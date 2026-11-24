@@ -70,7 +70,7 @@ The command line is not needed for daily use. Every flag belongs to
 | `NexUIProcess.exe --diagnostics-bundle` | Write a diagnostics folder to `%APPDATA%\Nex\support` for a bug report. |
 | `NexUIProcess.exe --probe-index` | Report what the index currently holds. |
 | `NexUIProcess.exe --update-plan` | Show which installation an update would modify, whether it needs elevation, and what it would install. Downloads nothing. |
-| `NexUIProcess.exe --update` | Apply an update now. Uses the updater script unless `NEX_UPDATE_ENGINE=native` selects the native engine. |
+| `NexUIProcess.exe --update` | Apply an update now. Downloads and verifies the release, stops Nex, installs it, and restarts it. |
 | `NexUIProcess.exe --update --force` | With the native engine, reinstall the published version even when it is already installed. |
 
 `--update` refuses when the installed version is already current, and refuses

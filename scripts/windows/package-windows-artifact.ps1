@@ -144,7 +144,6 @@ Copy-Item "docs/development/validation-checklist.md" (Join-Path $stageDir "docs/
 Copy-Item "docs/releases/windows-milestone-release-notes-template.md" (Join-Path $stageDir "docs/release-notes-template.md") -Force
 Copy-Item "scripts/windows/install-nex.ps1" (Join-Path $stageDir "scripts/install-nex.ps1") -Force
 Copy-Item "scripts/windows/uninstall-nex.ps1" (Join-Path $stageDir "scripts/uninstall-nex.ps1") -Force
-Copy-Item "scripts/windows/update-nex.ps1" (Join-Path $stageDir "scripts/update-nex.ps1") -Force
 
 Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $zipPath
 

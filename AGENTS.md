@@ -232,7 +232,6 @@ active meanwhile. The snapshot-sync loop respawns a dead indexer.
 |---|---|
 | `NEX_SUPPRESS_STDIO=1` | Suppress stdout logging (also `SWIFTFIND_SUPPRESS_STDIO`) |
 | `NEX_WINDOWS_RUNTIME_SMOKE=1` | Enable the windows runtime smoke test (otherwise skips) |
-| `NEX_UPDATE_ENGINE=native` | Apply updates with the native engine instead of `scripts/windows/update-nex.ps1`. Off by default until the engine has proven itself on a real install. |
 | `NEX_DISCOVERY_BACKEND` | `mft` forces the NTFS MFT snapshot backend, `walkdir` disables it; unset = auto (MFT when a per-root cap is >= 100k) |
 
 ## Overlay Architecture

@@ -43,6 +43,12 @@ const ICON_NORMALIZATION_VERSION: u8 = 4;
 /// How long a memory entry is trusted before the prefetch thread re-stats
 /// its source. Keeps per-keystroke prefetch from re-reading every `.lnk`.
 const REVALIDATE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long a path that produced no icon is left alone when its source cannot
+/// be fingerprinted (a deleted target, an unreadable network path). Without
+/// this, every result push re-ran the whole extraction chain — several shell
+/// calls and a package lookup — for a row that will never produce an icon.
+const NO_ICON_RETRY: Duration = Duration::from_secs(60);
 /// Disk budget per in-memory entry, so the disk tier scales with the
 /// memory target (clamped by `IconDiskCache` to 8–32 MiB).
 const DISK_BYTES_PER_MEMORY_ENTRY: u64 = 64 * 1024;
@@ -86,8 +92,15 @@ struct Inner {
     /// changed) is not mistaken for one already delivered.
     sent: HashMap<PathBuf, Arc<str>>,
     last_touch: HashMap<PathBuf, Instant>,
+    /// Paths whose extraction produced nothing, with the source state at the
+    /// time. A hit suppresses another attempt: while the fingerprint is
+    /// unchanged, or for `no_icon_retry` when there was nothing to fingerprint.
+    /// Memory only — a failure is a property of this session's shell state, not
+    /// something worth persisting.
+    failed: HashMap<PathBuf, (Option<Fingerprint>, Instant)>,
     max_entries: NonZeroUsize,
     idle_trim: Duration,
+    no_icon_retry: Duration,
 }
 
 impl Inner {
@@ -123,8 +136,10 @@ impl IconCache {
                 uri: HashMap::new(),
                 sent: HashMap::new(),
                 last_touch: HashMap::new(),
+                failed: HashMap::new(),
                 max_entries,
                 idle_trim: Duration::from_millis(idle_trim_ms as u64),
+                no_icon_retry: NO_ICON_RETRY,
             }),
             disk: None,
         }
@@ -161,6 +176,12 @@ impl IconCache {
                 return bytes;
             }
         }
+        // A path that already produced nothing is not worth another chain of
+        // shell calls. This is the whole fix for the per-keystroke repeat: the
+        // prefetch thread used to re-pay it for every visible row, every push.
+        if self.failure_is_current(&key, path) {
+            return None;
+        }
         // Fingerprint before decoding: if the source changes mid-decode the
         // stored fingerprint is the old one, so the next lookup re-extracts.
         let fingerprint = source_fingerprint(path);
@@ -171,7 +192,10 @@ impl IconCache {
         let bytes = match from_disk {
             Some(bytes) => bytes,
             None => {
-                let bytes = decode_png(&PathBuf::from(path))?;
+                let Some(bytes) = decode_png(&PathBuf::from(path)) else {
+                    self.record_failure(&key, fingerprint);
+                    return None;
+                };
                 if let (Some(disk), Some(fp)) = (&self.disk, fingerprint) {
                     disk.store(path, fp, &bytes);
                 }
@@ -180,6 +204,7 @@ impl IconCache {
         };
         let bytes = Arc::new(bytes);
         if let Ok(mut inner) = self.inner.lock() {
+            inner.failed.remove(&key);
             inner.png.put(
                 key.clone(),
                 Entry {
@@ -204,6 +229,12 @@ impl IconCache {
             return false;
         }
         let key = cache_key(path);
+        // A path that produced no icon is not cold: retrying it costs the whole
+        // extraction chain and returns nothing, which is exactly what used to
+        // happen on every push for every permanently failing row.
+        if self.failure_is_current(&key, path) {
+            return true;
+        }
         let recorded = {
             let Ok(mut inner) = self.inner.lock() else { return false };
             let Some(entry) = inner.png.get(&key) else { return false };
@@ -344,7 +375,52 @@ impl IconCache {
             inner.png.clear();
             inner.uri.clear();
             inner.last_touch.clear();
+            inner.failed.clear();
         }
+    }
+
+    /// Is a recorded failure still the last word for this path?
+    ///
+    /// A fingerprinted source stays suppressed until the source changes: the
+    /// same unchanged file cannot start producing an icon on its own. With
+    /// nothing to fingerprint (a deleted or unreachable path) the only honest
+    /// rule is a short window, because the path may become valid at any moment.
+    ///
+    /// The stat is paid only for a path that has already failed, so a warm
+    /// result set pays nothing for this.
+    fn failure_is_current(&self, key: &PathBuf, path: &str) -> bool {
+        let (recorded, window) = match self.inner.lock() {
+            Ok(inner) => (inner.failed.get(key).copied(), inner.no_icon_retry),
+            Err(_) => return false,
+        };
+        // The lock is released here: fingerprinting can stat a slow or
+        // unreachable path and must not be paid with the cache locked.
+        match recorded {
+            Some((Some(recorded_fp), _)) => source_fingerprint(path) == Some(recorded_fp),
+            Some((None, at)) => at.elapsed() < window,
+            None => false,
+        }
+    }
+
+    /// Remember that `key` produced no icon, bounded like the other side maps.
+    fn record_failure(&self, key: &PathBuf, fingerprint: Option<Fingerprint>) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if inner.failed.len() >= inner.max_entries.get().saturating_mul(4) {
+            inner.failed.clear();
+        }
+        inner.failed.insert(key.clone(), (fingerprint, Instant::now()));
+    }
+
+    /// Test-only: shorten the window so expiry can be asserted without waiting
+    /// a minute.
+    #[cfg(test)]
+    fn with_no_icon_retry(mut self, window: Duration) -> Self {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.no_icon_retry = window;
+        }
+        self
     }
 
     /// Drop memory and disk tiers. Safe while the prefetch thread runs:
@@ -500,7 +576,22 @@ pub(crate) fn data_uri(bytes: &[u8]) -> String {
 /// which is the only reliable cross-format approach.  Falls back to
 /// direct decode for `.png` images (which carry no Windows icon
 /// resource).
+#[cfg(test)]
+thread_local! {
+    /// Counts `decode_png` calls on the calling thread so a test can assert that
+    /// a repeat push does not pay the extraction chain again. Thread-local: the
+    /// suite runs tests in parallel and each one owns its thread.
+    static DECODE_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_decode_attempts() -> usize {
+    DECODE_ATTEMPTS.with(|count| count.replace(0))
+}
+
 fn decode_png(path: &PathBuf) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    DECODE_ATTEMPTS.with(|count| count.set(count.get() + 1));
     let path_str = path.to_string_lossy();
 
     // ms-settings:{uri} — synthetic Settings page icons: render the
@@ -1819,6 +1910,112 @@ mod tests {
             (0, String::from(r"C:\nex-icon-test-missing-b.exe")),
         ];
         assert!(decode_icon_paths(&cache, &paths).is_empty());
+    }
+
+    /// A path that produced nothing must not go back through the extractors on
+    /// every result push: each attempt is several shell calls, and the row's
+    /// visibility re-pushes it on every keystroke.
+    #[test]
+    fn a_path_without_an_icon_is_decoded_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-icon-here.exe");
+        let path = path.to_string_lossy().to_string();
+        let cache = IconCache::default();
+        take_decode_attempts();
+
+        assert!(cache.png_bytes(&path).is_none(), "no icon for a missing file");
+        assert_eq!(take_decode_attempts(), 1, "first lookup extracts");
+
+        for _ in 0..5 {
+            assert!(cache.png_bytes(&path).is_none());
+        }
+        assert_eq!(
+            take_decode_attempts(),
+            0,
+            "repeat pushes must not re-run the extraction chain"
+        );
+        assert!(
+            cache.has_fresh(&path),
+            "a failed path is not cold work for the prefetch thread"
+        );
+    }
+
+    /// A source that exists but yields no icon is remembered against its
+    /// fingerprint, so it is retried exactly when the file changes - and not
+    /// before, because an unchanged file cannot start producing one.
+    ///
+    /// A path that does *not* exist has no fingerprint to watch, which is what
+    /// `an_unfingerprinted_failure_expires` covers.
+    #[test]
+    fn a_fingerprinted_failure_is_retried_only_when_the_source_changes() {
+        // An existing file that decodes to nothing: a zero-byte `.png`, which
+        // takes the direct image path and fails there. A real `.exe` cannot be
+        // used for this, because the shell returns a generic icon for anything
+        // it can stat - which is why the deleted/unreadable case below is the
+        // one that actually needs the retry window.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken-icon.png");
+        let path = path.to_string_lossy().to_string();
+        std::fs::write(&path, b"").unwrap();
+        let cache = IconCache::default();
+        take_decode_attempts();
+
+        assert!(cache.png_bytes(&path).is_none(), "empty png cannot decode");
+        assert_eq!(take_decode_attempts(), 1);
+
+        assert!(cache.png_bytes(&path).is_none());
+        assert_eq!(
+            take_decode_attempts(),
+            0,
+            "the same unchanged file is not worth another chain of shell calls"
+        );
+
+        // Replaced with different bytes: the recorded fingerprint no longer
+        // matches, so this one attempt is allowed.
+        std::fs::write(&path, b"not a png, but different bytes").unwrap();
+        assert!(cache.png_bytes(&path).is_none());
+        assert_eq!(take_decode_attempts(), 1, "a changed source is retried");
+
+        assert!(cache.png_bytes(&path).is_none());
+        assert_eq!(
+            take_decode_attempts(),
+            0,
+            "and the new failure is remembered too"
+        );
+    }
+
+    /// With nothing to fingerprint there is no change to watch for, so the
+    /// suppression expires instead of lasting the whole session.
+    #[test]
+    fn an_unfingerprinted_failure_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.exe").to_string_lossy().to_string();
+        let cache = IconCache::default().with_no_icon_retry(Duration::from_millis(30));
+        take_decode_attempts();
+
+        assert!(cache.png_bytes(&path).is_none());
+        assert_eq!(take_decode_attempts(), 1);
+        assert!(cache.png_bytes(&path).is_none());
+        assert_eq!(take_decode_attempts(), 0);
+
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(cache.png_bytes(&path).is_none());
+        assert_eq!(take_decode_attempts(), 1, "the window has passed");
+    }
+
+    /// "Clear Icon Cache" is the escape hatch a stuck failure needs.
+    #[test]
+    fn clearing_the_cache_forgets_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stuck.exe").to_string_lossy().to_string();
+        let cache = IconCache::default();
+        take_decode_attempts();
+
+        assert!(cache.png_bytes(&path).is_none());
+        assert_eq!(take_decode_attempts(), 1);
+        cache.clear_all();
+        assert!(cache.png_bytes(&path).is_none());
+        assert_eq!(take_decode_attempts(), 1, "cleared, so it tries again");
     }
 
     #[test]

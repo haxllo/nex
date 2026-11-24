@@ -841,49 +841,38 @@ pub(crate) fn command_update_plan() -> Result<(), RuntimeError> {
     Ok(())
 }
 
-/// `--update`: apply an update through the selected engine.
+/// `--update`: apply an update now.
 ///
-/// `NEX_UPDATE_ENGINE=native` opts a single run into the native engine; the
-/// script stays the default until the engine has proven itself on a real
-/// install. Both paths print a one-line result so a terminal run is readable
-/// without opening the log.
+/// Prints one line per step result, so a terminal run is readable without
+/// opening `updater.log`. The in-app path does not use this: it starts a
+/// detached copy of the runtime instead, because this process is one of the
+/// things the update has to stop.
 pub(crate) fn command_update(force: bool) -> Result<(), RuntimeError> {
     let channel = crate::updater::UpdateChannel::Stable;
-    match crate::updater::UpdateEngine::from_environment() {
-        crate::updater::UpdateEngine::Native => {
-            println!("[nex] update via native engine");
-            let options = crate::updater_apply::UpdateOptions {
-                keep_backup: false,
-                force,
-            };
-            match crate::updater_apply::run_update(channel, options) {
-                Ok(crate::updater_apply::UpdateOutcome::Updated {
-                    version,
-                    install_root,
-                    backup,
-                }) => {
-                    println!("[nex] updated to {version} at {}", install_root.display());
-                    if let Some(backup) = backup {
-                        println!("[nex] previous version kept at {}", backup.display());
-                    }
-                    Ok(())
-                }
-                Ok(crate::updater_apply::UpdateOutcome::AlreadyCurrent { version }) => {
-                    println!("[nex] already up to date ({version})");
-                    Ok(())
-                }
-                Err(error) => {
-                    println!("[nex] update failed: {error}");
-                    Err(RuntimeError::Args(format!("update failed: {error}")))
-                }
+    println!("[nex] applying update");
+    let options = crate::updater_apply::UpdateOptions {
+        keep_backup: false,
+        force,
+    };
+    match crate::updater_apply::run_update(channel, options) {
+        Ok(crate::updater_apply::UpdateOutcome::Updated {
+            version,
+            install_root,
+            backup,
+        }) => {
+            println!("[nex] updated to {version} at {}", install_root.display());
+            if let Some(backup) = backup {
+                println!("[nex] previous version kept at {}", backup.display());
             }
-        }
-        crate::updater::UpdateEngine::Script => {
-            println!("[nex] update via updater script");
-            let script = crate::updater::launch_updater(channel)
-                .map_err(|error| RuntimeError::Args(error.to_string()))?;
-            println!("[nex] started {}", script.display());
             Ok(())
+        }
+        Ok(crate::updater_apply::UpdateOutcome::AlreadyCurrent { version }) => {
+            println!("[nex] already up to date ({version})");
+            Ok(())
+        }
+        Err(error) => {
+            println!("[nex] update failed: {error}");
+            Err(RuntimeError::Args(format!("update failed: {error}")))
         }
     }
 }

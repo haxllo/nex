@@ -2039,11 +2039,28 @@ impl RuntimeWorker {
                 std::thread::Builder::new()
                     .name("nex-update-button".into())
                     .spawn(move || {
-                        let message = match crate::updater::run_updater_capture(
+                        // Check in process, then start the engine only when
+                        // there is something to install. A detached engine
+                        // cannot report back - it stops this process as its
+                        // first real step - so the answer has to be decided
+                        // here, where the user can still be told.
+                        let message = match crate::updater::check_update_available(
                             crate::updater::UpdateChannel::Stable,
                         ) {
-                            Ok(output) => crate::updater::summarize_update_output(&output),
-                            Err(error) => format!("Could not launch updater: {error}"),
+                            crate::updater::UpdateCheck::UpToDate { latest } => {
+                                format!("Up to date (v{latest})")
+                            }
+                            crate::updater::UpdateCheck::Available { version } => {
+                                match crate::updater::launch_native_updater() {
+                                    Ok(_) => format!("Updating to v{version}..."),
+                                    Err(error) => {
+                                        format!("Could not start the update: {error}")
+                                    }
+                                }
+                            }
+                            crate::updater::UpdateCheck::Failed { reason } => {
+                                format!("Update check failed: {reason}")
+                            }
                         };
                         log_info(&format!("[nex] update button result: {message}"));
                         let _ = event_tx.send(OverlayEvent::UpdateStatus(message));
@@ -2264,12 +2281,22 @@ impl RuntimeWorker {
                 std::thread::Builder::new()
                     .name("nex-updater-check".into())
                     .spawn(move || {
-                        let message = match crate::updater::run_updater_capture(
+                        let message = match crate::updater::check_update_available(
                             crate::updater::UpdateChannel::Stable,
                         ) {
-                            Ok(output) => crate::updater::summarize_update_output(&output),
-                            Err(error) => {
-                                format!("Could not launch updater: {error}")
+                            crate::updater::UpdateCheck::UpToDate { latest } => {
+                                format!("Up to date (v{latest})")
+                            }
+                            crate::updater::UpdateCheck::Available { version } => {
+                                match crate::updater::launch_native_updater() {
+                                    Ok(_) => format!("Updating to v{version}..."),
+                                    Err(error) => {
+                                        format!("Could not start the update: {error}")
+                                    }
+                                }
+                            }
+                            crate::updater::UpdateCheck::Failed { reason } => {
+                                format!("Update check failed: {reason}")
                             }
                         };
                         log_info(&format!("[nex] updater result: {message}"));

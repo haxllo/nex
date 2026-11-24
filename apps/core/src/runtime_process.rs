@@ -100,13 +100,12 @@ pub(crate) fn hotkey_registration_status_text(hotkey: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn launch_stable_updater() -> Result<std::path::PathBuf, String> {
-    let script_path = crate::updater::launch_updater(crate::updater::UpdateChannel::Stable)
-        .map_err(|error| error.to_string())?;
+    let updater = crate::updater::launch_native_updater().map_err(|error| error.to_string())?;
     log_info(&format!(
-        "[nex] updater_launch channel=stable script={}",
-        script_path.display()
+        "[nex] updater_launch engine=native channel=stable exe={}",
+        updater.display()
     ));
-    Ok(script_path)
+    Ok(updater)
 }
 
 // ---------------------------------------------------------------------------

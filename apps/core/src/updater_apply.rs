@@ -38,7 +38,7 @@ const BACKUP_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// Short-lived helper invocations (`--quit`, `--ensure-config`).
 const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 
-const RUNTIME_IMAGES: [&str; 5] = [
+pub(crate) const RUNTIME_IMAGES: [&str; 5] = [
     "NexUIProcess.exe",
     "NexIndexerProcess.exe",
     "NexHelper.exe",
@@ -165,7 +165,6 @@ pub fn run_update(
     }
     log.step(&format!("[2/5] installer verified ({actual})"));
 
-    let installed_exe = crate::update_install::runtime_executable(&target.root);
     let backup_dir = backup_directory(&cache_root, &stamp);
 
     // From here on, a failure must restore what was there before.
@@ -420,7 +419,7 @@ fn read_manifest(path: &Path) -> Result<ReleaseManifest, UpdateError> {
     })
 }
 
-fn update_cache_root() -> PathBuf {
+pub(crate) fn update_cache_root() -> PathBuf {
     match std::env::var("LOCALAPPDATA") {
         Ok(local_app_data) if !local_app_data.trim().is_empty() => {
             PathBuf::from(local_app_data).join("Nex").join("updates")
@@ -555,7 +554,7 @@ fn local_time() -> (u16, u16, u16, u16, u16, u16) {
 }
 
 /// `20261123-120000` — unique per attempt without a date library.
-fn timestamp_stamp() -> String {
+pub(crate) fn timestamp_stamp() -> String {
     let (year, month, day, hour, minute, second) = local_time();
     format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
 }

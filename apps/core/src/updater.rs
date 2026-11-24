@@ -1,10 +1,6 @@
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
-const INSTALLED_UPDATER_RELATIVE_PATH: &str = "scripts/update-nex.ps1";
-const INSTALLED_UPDATER_FALLBACK_NAME: &str = "update-nex.ps1";
-const DEV_UPDATER_RELATIVE_PATH: &str = "scripts/windows/update-nex.ps1";
-const MAX_ANCESTOR_SCAN_DEPTH: usize = 10;
 const RELEASES_API: &str = "https://api.github.com/repos/haxllo/nex/releases?per_page=40";
 const RELEASES_USER_AGENT: &str = "Nex-Updater";
 
@@ -54,147 +50,126 @@ impl UpdateChannel {
     }
 }
 
+/// What can go wrong starting an update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateLaunchError {
     UnsupportedPlatform,
     EnvironmentUnavailable(String),
-    ScriptNotFound { checked_paths: Vec<PathBuf> },
     LaunchFailed(String),
 }
 
 impl Display for UpdateLaunchError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedPlatform => write!(f, "updater is only available on Windows"),
-            Self::EnvironmentUnavailable(message) => write!(f, "{message}"),
-            Self::ScriptNotFound { checked_paths } => {
-                if checked_paths.is_empty() {
-                    write!(f, "update script not found")
-                } else {
-                    let joined = checked_paths
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    write!(f, "update script not found (checked: {joined})")
-                }
-            }
-            Self::LaunchFailed(message) => write!(f, "{message}"),
+            Self::UnsupportedPlatform => write!(formatter, "updates are only available on Windows"),
+            Self::EnvironmentUnavailable(message) => write!(formatter, "{message}"),
+            Self::LaunchFailed(message) => write!(formatter, "{message}"),
         }
     }
 }
 
 impl std::error::Error for UpdateLaunchError {}
 
-/// Which apply path an update uses.
+/// Start an update in a process that can outlive this one.
 ///
-/// `Script` stays the default while the native engine is unproven on a real
-/// install: it is the only path that has ever recovered a half-moved install,
-/// and losing that to save a child process would be a bad trade. `Native` is
-/// opt-in per run, so one machine can try it without changing what every user
-/// gets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdateEngine {
-    Script,
-    Native,
+/// The engine stops the running UI and moves the install tree out from under
+/// it, so it cannot run inside the UI: `NexUIProcess.exe` cannot replace the
+/// install it is executing from. The running binary is copied into the update
+/// cache as `NexUpdater.exe` and started detached with `--update`.
+///
+/// That name is deliberate. It is not one of `RUNTIME_IMAGES`, so no stop path
+/// in the engine can target the updater itself, whichever process started it.
+pub fn launch_native_updater() -> Result<PathBuf, UpdateLaunchError> {
+    let current = std::env::current_exe().map_err(|error| {
+        UpdateLaunchError::EnvironmentUnavailable(format!(
+            "could not resolve current executable path: {error}"
+        ))
+    })?;
+    let updater = stage_updater_copy(&current)?;
+    spawn_updater_detached(&updater)?;
+    Ok(updater)
 }
 
-impl UpdateEngine {
-    /// `NEX_UPDATE_ENGINE=native` selects the native engine; anything else
-    /// (including unset) keeps the script.
-    pub fn from_environment() -> Self {
-        match std::env::var("NEX_UPDATE_ENGINE") {
-            Ok(value) if value.trim().eq_ignore_ascii_case("native") => Self::Native,
-            _ => Self::Script,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Script => "script",
-            Self::Native => "native",
-        }
-    }
+/// Copy the running binary somewhere it can run while its install is replaced.
+fn stage_updater_copy(current: &Path) -> Result<PathBuf, UpdateLaunchError> {
+    let directory = crate::updater_apply::update_cache_root()
+        .join(format!("updater-{}", crate::updater_apply::timestamp_stamp()));
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        UpdateLaunchError::EnvironmentUnavailable(format!(
+            "could not create '{}': {error}",
+            directory.display()
+        ))
+    })?;
+    let updater = directory.join("NexUpdater.exe");
+    std::fs::copy(current, &updater).map_err(|error| {
+        UpdateLaunchError::LaunchFailed(format!(
+            "could not copy the updater to '{}': {error}",
+            updater.display()
+        ))
+    })?;
+    Ok(updater)
 }
 
-pub fn launch_updater(channel: UpdateChannel) -> Result<PathBuf, UpdateLaunchError> {
-    let script_path = resolve_updater_script()?;
-    launch_updater_script(script_path.as_path(), channel)?;
-    Ok(script_path)
-}
+#[cfg(target_os = "windows")]
+fn spawn_updater_detached(updater: &Path) -> Result<(), UpdateLaunchError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::System::Threading::{
+        CREATE_NO_WINDOW, DETACHED_PROCESS, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW,
+    };
 
-/// Run the updater script to completion, capturing its output.
-/// Launches with a hidden window (no console flash).
-pub fn run_updater_capture(
-    channel: UpdateChannel,
-) -> Result<std::process::Output, UpdateLaunchError> {
-    let script_path = resolve_updater_script()?;
-    run_updater_script(script_path.as_path(), channel)
-}
+    let command_line = format!("\"{}\" --update", updater.display());
+    let mut command_line: Vec<u16> = std::ffi::OsStr::new(&command_line)
+        .encode_wide()
+        .chain([0])
+        .collect();
+    let working_dir: Vec<u16> = std::env::temp_dir()
+        .as_os_str()
+        .encode_wide()
+        .chain([0])
+        .collect();
+    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
-/// Summarize an updater script run into a single user-facing status line.
-/// Prefers the script's NEX_UPDATE_RESULT marker (JSON); falls back to
-/// exit code / stderr.
-pub fn summarize_update_output(output: &std::process::Output) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines().rev() {
-        if let Some((_, json)) = line.split_once("NEX_UPDATE_RESULT:") {
-            let json = json.trim();
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
-                let status = value
-                    .get("status")
-                    .and_then(|field| field.as_str())
-                    .unwrap_or("");
-                let version = value
-                    .get("version")
-                    .and_then(|field| field.as_str())
-                    .unwrap_or("");
-                return match status {
-                    "up-to-date" => format!("Up to date (v{version})"),
-                    "updated" => format!("Updated to v{version}"),
-                    "version-skew" => {
-                        let message = value
-                            .get("message")
-                            .and_then(|field| field.as_str())
-                            .unwrap_or("running copy differs from installed copy; restart Nex");
-                        format!("Restart Nex: {message}")
-                    }
-                    _ => {
-                        let message = value
-                            .get("message")
-                            .and_then(|field| field.as_str())
-                            .unwrap_or("unknown error");
-                        format!("Update failed: {message}")
-                    }
-                };
-            }
-        }
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let last_err = stderr
-        .lines()
-        .find(|line| {
-            let line = line.trim();
-            !line.is_empty()
-                && !line.starts_with("+ CategoryInfo")
-                && !line.starts_with("+ FullyQualifiedErrorId")
-        })
-        .or_else(|| stderr.lines().rev().find(|line| !line.trim().is_empty()))
-        .unwrap_or("");
-    if output.status.success() {
-        "Update finished".to_string()
-    } else if !last_err.is_empty() {
-        format!("Update failed: {last_err}")
-    } else {
-        format!(
-            "Update failed (exit {})",
-            output.status.code().unwrap_or(-1)
+    // Handles are deliberately not inherited. `Command::spawn` passes
+    // `bInheritHandles=TRUE`, so a child holds every inheritable handle this
+    // process owns; any of those pointing into the install tree makes the
+    // engine's own backup move fail with "in use" by itself.
+    let launched = unsafe {
+        CreateProcessW(
+            std::ptr::null(),
+            command_line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            CREATE_NO_WINDOW | DETACHED_PROCESS,
+            std::ptr::null(),
+            working_dir.as_ptr(),
+            &raw mut startup,
+            &raw mut process_info,
         )
+    };
+    if launched == 0 {
+        let code = unsafe { GetLastError() };
+        return Err(UpdateLaunchError::LaunchFailed(format!(
+            "failed to start the updater '{}': CreateProcessW failed with code {code}",
+            updater.display()
+        )));
     }
+    unsafe {
+        CloseHandle(process_info.hProcess);
+        CloseHandle(process_info.hThread);
+    }
+    Ok(())
 }
 
-/// Check if an update is available by running the updater in capture mode
-/// and parsing the output. Returns (available, detected version).
+#[cfg(not(target_os = "windows"))]
+fn spawn_updater_detached(_updater: &Path) -> Result<(), UpdateLaunchError> {
+    Err(UpdateLaunchError::UnsupportedPlatform)
+}
+
+/// Everything an update would do, decided and written out but not performed.
 /// Everything an update would do, decided and written out but not performed.
 ///
 /// This exists because "which install would be modified, and with elevation or
@@ -399,206 +374,11 @@ pub(crate) fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
     Ordering::Equal
 }
 
-fn resolve_updater_script() -> Result<PathBuf, UpdateLaunchError> {
-    let exe_path = std::env::current_exe().map_err(|error| {
-        UpdateLaunchError::EnvironmentUnavailable(format!(
-            "could not resolve current executable path: {error}"
-        ))
-    })?;
-    let checked_paths = updater_script_candidates(&exe_path);
-    let script_path = checked_paths
-        .iter()
-        .find(|candidate| candidate.exists())
-        .cloned()
-        .ok_or_else(|| UpdateLaunchError::ScriptNotFound {
-            checked_paths: checked_paths.clone(),
-        })?;
-    Ok(script_path)
-}
-
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-#[cfg(target_os = "windows")]
-fn build_updater_command(script_path: &Path, channel: UpdateChannel) -> std::process::Command {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
-
-    // Let PowerShell and its Inno Setup child activate their own windows.
-    // Windows otherwise treats this worker-thread launch as background work.
-    unsafe {
-        AllowSetForegroundWindow(ASFW_ANY);
-    }
-
-    let mut command = std::process::Command::new("powershell.exe");
-    // Never inherit our working directory: if Nex runs from inside its own
-    // install tree, the updater child would hold that tree open and its
-    // later Move-Item of the install would fail with "in use" — by itself.
-    command.current_dir(std::env::temp_dir());
-    command
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-File")
-        .arg(script_path)
-        .arg("-Channel")
-        .arg(channel.as_arg());
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
-}
-
-#[cfg(target_os = "windows")]
-fn launch_updater_script(
-    script_path: &Path,
-    channel: UpdateChannel,
-) -> Result<(), UpdateLaunchError> {
-    spawn_updater_detached(script_path, channel)
-}
-
-/// Spawn the real updater with handle inheritance DISABLED.
-///
-/// Rust's `Command::spawn()` always passes `bInheritHandles=TRUE`, so a
-/// child of Nex inherits every inheritable handle Nex holds. If any of
-/// those point into the install tree, the updater's later backup move
-/// fails with "in use" *by itself* — surviving Nex's own death, which
-/// is exactly the persistent (non-transient) failure this guards
-/// against. Raw `CreateProcessW` with `bInheritHandles=FALSE` closes
-/// that hole; the short-lived check/capture paths keep using
-/// `build_updater_command` (no move happens there).
-#[cfg(target_os = "windows")]
-fn spawn_updater_detached(
-    script_path: &Path,
-    channel: UpdateChannel,
-) -> Result<(), UpdateLaunchError> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
-    use windows_sys::Win32::System::Threading::{
-        CREATE_NO_WINDOW, DETACHED_PROCESS, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
-
-    // Let PowerShell and its Inno Setup child activate their own windows.
-    unsafe {
-        AllowSetForegroundWindow(ASFW_ANY);
-    }
-
-    let command_line = format!(
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\" -Channel {}",
-        script_path.display(),
-        channel.as_arg()
-    );
-    let mut command_line: Vec<u16> =
-        std::ffi::OsStr::new(&command_line).encode_wide().chain([0]).collect();
-    let working_dir: Vec<u16> = std::env::temp_dir()
-        .as_os_str()
-        .encode_wide()
-        .chain([0])
-        .collect();
-    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
-    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-    let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-    let launched = unsafe {
-        CreateProcessW(
-            std::ptr::null(),
-            command_line.as_mut_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            CREATE_NO_WINDOW | DETACHED_PROCESS,
-            std::ptr::null(),
-            working_dir.as_ptr(),
-            &raw mut startup,
-            &raw mut process_info,
-        )
-    };
-    if launched == 0 {
-        let code = unsafe { GetLastError() };
-        return Err(UpdateLaunchError::LaunchFailed(format!(
-            "failed to launch updater script '{}': CreateProcessW failed with code {code}",
-            script_path.display()
-        )));
-    }
-    unsafe {
-        CloseHandle(process_info.hProcess);
-        CloseHandle(process_info.hThread);
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn run_updater_script(
-    script_path: &Path,
-    channel: UpdateChannel,
-) -> Result<std::process::Output, UpdateLaunchError> {
-    let mut command = build_updater_command(script_path, channel);
-    // Lets the script detect version skew between this running copy and
-    // the registered install before doing anything destructive.
-    command.arg("-RunningVersion").arg(env!("CARGO_PKG_VERSION"));
-    command.output().map_err(|error| {
-        UpdateLaunchError::LaunchFailed(format!(
-            "failed to run updater script '{}': {error}",
-            script_path.display()
-        ))
-    })
-}
-
-#[cfg(not(target_os = "windows"))]
-fn launch_updater_script(
-    _script_path: &Path,
-    _channel: UpdateChannel,
-) -> Result<(), UpdateLaunchError> {
-    Err(UpdateLaunchError::UnsupportedPlatform)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn run_updater_script(
-    _script_path: &Path,
-    _channel: UpdateChannel,
-) -> Result<std::process::Output, UpdateLaunchError> {
-    Err(UpdateLaunchError::UnsupportedPlatform)
-}
-
-fn updater_script_candidates(exe_path: &Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    if let Some(exe_dir) = exe_path.parent() {
-        if let Some(install_root) = exe_dir.parent() {
-            push_unique(
-                &mut candidates,
-                install_root.join(INSTALLED_UPDATER_RELATIVE_PATH),
-            );
-            push_unique(
-                &mut candidates,
-                install_root.join(INSTALLED_UPDATER_FALLBACK_NAME),
-            );
-        }
-        collect_ancestor_candidates(exe_dir, &mut candidates, DEV_UPDATER_RELATIVE_PATH);
-    }
-
-
-    candidates
-}
-
-fn collect_ancestor_candidates(base: &Path, out: &mut Vec<PathBuf>, relative: &str) {
-    for ancestor in base.ancestors().take(MAX_ANCESTOR_SCAN_DEPTH) {
-        push_unique(out, ancestor.join(relative));
-    }
-}
-
-fn push_unique(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
-    if !paths.iter().any(|existing| existing == &candidate) {
-        paths.push(candidate);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_versions, newest_release, normalize_version, select_release,
-        updater_script_candidates, ReleaseAsset, ReleaseTag, UpdateChannel, UpdateCheck,
-        DEV_UPDATER_RELATIVE_PATH, INSTALLED_UPDATER_RELATIVE_PATH,
+        compare_versions, newest_release, normalize_version, select_release, ReleaseAsset,
+        ReleaseTag, UpdateChannel, UpdateCheck,
     };
 
     fn release(tag: &str, prerelease: bool) -> ReleaseTag {
@@ -752,36 +532,27 @@ mod tests {
         ));
     }
 
+    /// Runs the real launcher once. Ignored by default because it starts a
+    /// process and writes into the update cache.
     #[test]
-    fn updater_candidates_prefer_installed_layout_before_repo_fallback() {
-        let root =
-            std::env::temp_dir().join(format!("nex-updater-installed-{}", std::process::id()));
-        let exe_path = root.join("bin/Nex.exe");
-        let candidates = updater_script_candidates(&exe_path);
-
-        assert_eq!(candidates[0], root.join(INSTALLED_UPDATER_RELATIVE_PATH));
-        assert_eq!(candidates[1], root.join("update-nex.ps1"));
+    #[ignore]
+    fn what_starting_the_updater_actually_does() {
+        let updater = super::launch_native_updater().expect("the launcher should start");
+        assert!(updater.is_file(), "{} should exist", updater.display());
+        assert_eq!(updater.file_name().unwrap(), "NexUpdater.exe");
+        // Let it finish so this test does not leave a process behind.
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        assert!(updater.is_file());
     }
 
     #[test]
-    fn updater_candidates_include_repo_style_script_lookup() {
-        let root = std::env::temp_dir().join(format!("nex-updater-repo-{}", std::process::id()));
-        let repo = root.join("repo");
-        let exe_path = repo.join("target/debug/Nex.exe");
-        let candidates = updater_script_candidates(&exe_path);
-
-        assert!(candidates
+    fn the_updater_copy_is_not_a_runtime_image() {
+        // The engine stops everything named in RUNTIME_IMAGES and skips only
+        // its own pid. If the staged updater were one of those names, a run
+        // started by the UI could kill the copy that is doing the updating.
+        let name = "NexUpdater.exe";
+        assert!(!crate::updater_apply::RUNTIME_IMAGES
             .iter()
-            .any(|candidate| candidate == &repo.join(DEV_UPDATER_RELATIVE_PATH)));
-    }
-
-    #[test]
-    fn updater_candidates_are_deduplicated() {
-        let repo = std::env::temp_dir().join(format!("nex-updater-dedupe-{}", std::process::id()));
-        let exe_path = repo.join("target/debug/Nex.exe");
-        let candidates = updater_script_candidates(&exe_path);
-        let unique = candidates.iter().collect::<std::collections::BTreeSet<_>>();
-
-        assert_eq!(candidates.len(), unique.len());
+            .any(|image| image.eq_ignore_ascii_case(name)));
     }
 }

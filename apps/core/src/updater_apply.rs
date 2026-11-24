@@ -172,7 +172,7 @@ pub fn run_update(
     let mut backed_up = false;
     let result = (|| -> Result<(), UpdateError> {
         log.step("[3/5] stopping the runtime");
-        stop_runtime(&installed_exe)
+        stop_runtime()
             .map_err(|message| UpdateError::new(Stage::Stop, message))?;
 
         log.step("[3/5] moving the current install aside");
@@ -241,7 +241,7 @@ pub fn run_update(
             log.step(&format!("update failed at {}: {}", error.stage.as_str(), error.message));
             if backed_up {
                 log.step("rolling back");
-                match rollback(&target.root, &backup_dir, &installed_exe) {
+                match rollback(&target.root, &backup_dir) {
                     Ok(()) => log.step("rollback complete: previous install restored"),
                     Err(message) => log.step(&format!(
                         "ROLLBACK FAILED: {message} (backup kept at {})",
@@ -517,8 +517,8 @@ fn remove_tree(path: &Path) -> Result<(), String> {
     }
 }
 
-fn rollback(install_root: &Path, backup: &Path, previous_exe: &Path) -> Result<(), String> {
-    let _ = stop_runtime(previous_exe);
+fn rollback(install_root: &Path, backup: &Path) -> Result<(), String> {
+    let _ = stop_runtime();
     remove_tree(install_root)?;
     move_tree(backup, install_root)?;
     let restored = crate::update_install::runtime_executable(install_root);
@@ -583,23 +583,39 @@ fn timestamp_line() -> String {
 /// 4. Verify they are gone. Proceeding while a process still holds files is
 ///    exactly how an install ends up half-moved with nothing to roll back to.
 #[cfg(target_os = "windows")]
-fn stop_runtime(installed_exe: &Path) -> Result<(), String> {
+fn stop_runtime() -> Result<(), String> {
     use std::time::Instant;
 
     let _ = run_captured("schtasks", &["/end", "/tn", "NexHelperV2"]);
 
-    if installed_exe.is_file() {
-        let _ = run_helper(installed_exe, "--quit", STOP_TIMEOUT);
+    // Never ask an installed `NexUIProcess.exe --quit` to do this.
+    //
+    // `--quit` stops *every* Nex instance it can find, and it cannot tell that
+    // this process is the updater rather than a stray copy: measured
+    // 2026-11-24, the forced run died at "[3/5] stopping the runtime" because
+    // the installed binary force-terminated its caller. A separate
+    // `powershell.exe` never had that problem, so the script never needed to
+    // know.
+    //
+    // What remains is the same mechanics the quit path uses, done directly:
+    // a graceful close per PID (which is WM_CLOSE, so the UI saves what it
+    // saves), a short wait, then a forced kill of whatever is left. All by PID,
+    // and never this process.
+    let own_pid = std::process::id();
+
+    for (pid, _name) in others_alive(&running_runtime_processes(), own_pid) {
+        let pid = pid.to_string();
+        let _ = run_captured("taskkill", &["/PID", &pid]);
     }
 
-    // Killed by PID, never by image name, and never this process.
-    //
-    // The engine runs *inside* `NexUIProcess.exe`, so `taskkill /IM
-    // NexUIProcess.exe /F` would kill the updater itself — mid-update, with the
-    // install tree already moved and nobody left to roll it back. The script
-    // was never exposed to this because it was a separate `powershell.exe`; a
-    // native engine that self-updates has to skip its own PID explicitly.
-    let own_pid = std::process::id();
+    let graceful_deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < graceful_deadline {
+        if others_alive(&running_runtime_processes(), own_pid).is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
     for (pid, _name) in others_alive(&running_runtime_processes(), own_pid) {
         let pid = pid.to_string();
         let _ = run_captured("taskkill", &["/PID", &pid, "/F"]);
@@ -625,7 +641,7 @@ fn stop_runtime(installed_exe: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn stop_runtime(_installed_exe: &Path) -> Result<(), String> {
+fn stop_runtime() -> Result<(), String> {
     Err("stopping the runtime is only available on Windows".into())
 }
 

@@ -46,6 +46,44 @@ A few consequences follow from that design:
 - **All capture and rendering run on one worker thread.** The UI thread only moves
   and shows the window, so a slow frame cannot block input.
 
+## The page's own chrome
+
+The lens is the material. The page sits on it and draws only the surfaces it owns —
+the composer, context menus, chat panels, and the footer controls — as tiers of
+tint, rim and sheen. It never uses `backdrop-filter`: the page is transparent where
+those surfaces are, so a filter would sample the desktop rather than the pane and
+would lose the lens a second time over.
+
+Three tiers, from `--glass-thin` to `--glass-thick`:
+
+| Tier | Fill | Worn by |
+|---|---|---|
+| Thin | 44 % of the base colour | Icon-only controls, on hover and focus |
+| Regular | 52 % | The composer, the jump-to-bottom control, a pressed control |
+| Thick | 64 % | Context menus and chat panels; the composer once focused |
+
+Fill rises with the amount of text the surface has to carry. The three percentages
+are the calibration dials: raise them for legibility, lower them for material.
+
+Every tier surface shares the same edge treatment. A 1 px border carries
+`--panel-edge` on the sides and `--panel-highlight` on top, so the rim is lit from
+above rather than evenly, and the first `background` layer is a `--panel-glint`
+gradient that fades out above the content. Both are plain declarations rather than
+pseudo-elements, which keeps `::before` free for the state layers and stops the
+sheen from competing with the focus ring drawn in `box-shadow`.
+
+The composer deepens from regular to thick on focus instead of turning opaque: it
+is still a surface on the material, and the extra fill is what makes the caret's
+row read as active.
+
+### When the material is not available
+
+| Condition | Result |
+|---|---|
+| `prefers-reduced-transparency: reduce` | Tiers and sheen go solid; the rim stays, because it is the only edge signal left once the fill stops carrying the backdrop |
+| `forced-colors: active` | Surfaces become `Canvas` with a `CanvasText` border |
+| Opaque panel modes | The page paints its own background; the tiers are already on an opaque surface |
+
 ## Why the first show can be slightly slower
 
 The glass reveals only after a presented frame that matches the panel's real size.

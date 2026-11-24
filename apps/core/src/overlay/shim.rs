@@ -34,6 +34,40 @@ pub struct NativeOverlayShell {
     inner: Arc<Inner>,
 }
 
+/// One step of the icon-prefetch thread.
+enum PrefetchStep {
+    /// A batch of paths to decode.
+    Batch(Vec<String>),
+    /// Woken with nothing queued: a token that outlived the work it announced.
+    Idle,
+    /// Every sender is gone, so nothing will ever arrive again.
+    Stop,
+}
+
+/// Wait for the next icon batch, blocking until there is one.
+///
+/// The producer stores the work slot *before* it sends its token, so a wake-up
+/// can never arrive ahead of the work it announces. That is what the previous
+/// `recv_timeout(50ms)` claimed to guard against, at the cost of twenty wake-ups
+/// a second for the entire life of the process — a timer that fired whether or
+/// not anyone was typing, and that also kept the thread alive after the shell
+/// was gone.
+fn next_prefetch_step(notify: &Receiver<()>, work: &Mutex<Option<Vec<String>>>) -> PrefetchStep {
+    if notify.recv().is_err() {
+        return PrefetchStep::Stop;
+    }
+    let mut slot = match work.lock() {
+        Ok(slot) => slot,
+        // Poisoned: the previous holder panicked. Stop rather than decode with
+        // a half-updated cache, matching what the old loop did on a bad lock.
+        Err(_) => return PrefetchStep::Stop,
+    };
+    match slot.take() {
+        Some(paths) if !paths.is_empty() => PrefetchStep::Batch(paths),
+        _ => PrefetchStep::Idle,
+    }
+}
+
 struct Inner {
     state: Arc<Mutex<ShimState>>,
     icon_cache: Arc<IconCache>,
@@ -50,10 +84,10 @@ struct Inner {
     /// Shared work slot for the single persistent icon-prefetch thread.
     /// `set_results()` and `set_quick_launch_items()` replace the contents;
     /// the worker always processes the latest batch — old work is discarded.
-    /// `prefetch_notify_tx` wakes the thread immediately so first
-    /// paint does not wait out the 50 ms poll sleep. Only the worker
-    /// thread holds the `Receiver` — a second stored receiver would
-    /// steal wake tokens (MPMC fan-out) and reintroduce the delay.
+    /// `prefetch_notify_tx` wakes the thread; it blocks on the channel
+    /// rather than polling. Only the worker thread holds the `Receiver` —
+    /// a second stored receiver would steal wake tokens (MPMC fan-out)
+    /// and reintroduce the delay.
     prefetch_work: Arc<Mutex<Option<Vec<String>>>>,
     prefetch_notify_tx: Sender<()>,
     /// Wake-up for the single persistent media-refresh thread. Refresh
@@ -74,9 +108,9 @@ impl NativeOverlayShell {
     pub fn create() -> Result<Self, String> {
         let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
         let prefetch_work: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
-        // Rendezvous wake-up: `set_results` offers a token; the thread
-        // blocks on `recv_timeout(50ms)` so a lost token only costs the
-        // old poll delay, never a stall.
+        // Rendezvous wake-up: `set_results` offers a token. The producer
+        // stores the work slot before it sends, so the consumer can block on
+        // the channel with no timeout and still never miss a batch.
         let (prefetch_notify_tx, prefetch_notify_for_thread) =
             crossbeam_channel::bounded::<()>(1);
         let icon_cache = Arc::new(IconCache::default().with_default_disk_cache());
@@ -159,18 +193,13 @@ impl NativeOverlayShell {
         std::thread::Builder::new()
             .name("nex-icon-prefetch".into())
             .spawn(move || loop {
-                // Block until a result or Quick Launch update wakes us;
-                // 50 ms is only a fallback for a lost token.
-                let _ = prefetch_notify_for_thread.recv_timeout(Duration::from_millis(50));
-                let paths: Vec<String> = {
-                    let mut slot = match prefetch_work_for_thread.lock() {
-                        Ok(g) => g,
-                        Err(_) => break,
-                    };
-                    match slot.take() {
-                        Some(r) if !r.is_empty() => r,
-                        _ => continue,
-                    }
+                let paths = match next_prefetch_step(
+                    &prefetch_notify_for_thread,
+                    &prefetch_work_for_thread,
+                ) {
+                    PrefetchStep::Batch(paths) => paths,
+                    PrefetchStep::Idle => continue,
+                    PrefetchStep::Stop => break,
                 };
                 // Visible-first streaming: decode the viewport head before
                 // the tail, but keep all decoding off the runtime worker.
@@ -830,4 +859,54 @@ fn pending_action_state(json: &str) -> Option<bool> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_prefetch_step, PrefetchStep};
+    use crossbeam_channel::bounded;
+    use std::sync::Mutex;
+
+    #[test]
+    fn a_queued_batch_is_taken_without_polling() {
+        let (notify, rx) = bounded::<()>(1);
+        let work = Mutex::new(Some(vec!["C:/a.lnk".to_string()]));
+        notify.try_send(()).unwrap();
+
+        match next_prefetch_step(&rx, &work) {
+            PrefetchStep::Batch(paths) => assert_eq!(paths, vec!["C:/a.lnk".to_string()]),
+            _ => panic!("a stored batch must be decoded"),
+        }
+        // The slot was drained, so a second token with nothing queued is idle
+        // rather than a repeat of the same work.
+        notify.try_send(()).unwrap();
+        assert!(matches!(
+            next_prefetch_step(&rx, &work),
+            PrefetchStep::Idle
+        ));
+    }
+
+    #[test]
+    fn an_empty_batch_is_idle_not_work() {
+        let (notify, rx) = bounded::<()>(1);
+        let work = Mutex::new(Some(Vec::new()));
+        notify.try_send(()).unwrap();
+        assert!(matches!(
+            next_prefetch_step(&rx, &work),
+            PrefetchStep::Idle
+        ));
+    }
+
+    #[test]
+    fn a_dropped_shell_ends_the_thread() {
+        // No senders left means no batch can ever arrive; the old loop would
+        // have woken twenty times a second forever to discover that.
+        let (notify, rx) = bounded::<()>(1);
+        drop(notify);
+        let work = Mutex::new(None);
+        assert!(matches!(
+            next_prefetch_step(&rx, &work),
+            PrefetchStep::Stop
+        ));
+    }
 }

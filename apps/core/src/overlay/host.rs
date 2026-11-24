@@ -11,7 +11,8 @@
 //! The window is positioned on the monitor under the cursor, grabs
 //! foreground focus on show (the `AttachThreadInput` trick — winit/tao
 //! cannot steal focus reliably on its own), and resizes to hug the
-//! web content so the DWM acrylic backdrop wraps the panel exactly.
+//! web content so the glass layer beneath it stays aligned with the
+//! panel.
 //!
 //! Memory: the WebView stays warm for the process lifetime so open
 //! timing is consistent. After hide, a warm-release timer clears the
@@ -29,7 +30,8 @@ use std::time::{Duration, Instant};
 
 /// Debounce window for live resize requests. Only applied to growth
 /// requests — shrink requests bypass debounce to avoid exposing
-/// acrylic while the native window waits for the timer to fire.
+/// the acrylic fallback while the native window waits for the timer
+/// to fire.
 const RESIZE_DEBOUNCE_MS: u64 = 100;
 
 /// Growth jumps larger than this bypass the debounce and apply at once —
@@ -467,7 +469,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Native refraction layer (enabled by default; NEX_REFRACT_LAB=0 opts
     // out) sits below the WebView. Create it before build_webview so it
     // stays lower in z-order without needing the WebView HWND. Any
-    // initialization failure keeps the Acrylic fallback available.
+    // initialization failure keeps the acrylic fallback available.
     let mut glass_layer = crate::overlay::refraction::GlassLayer::create_for_window(
         hwnd as isize,
         crate::overlay::refraction::physical_px(WINDOW_WIDTH, window.scale_factor()),
@@ -1802,7 +1804,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let _ = set_overlay_cloaked(hwnd, true);
                         // Single activation path (helper owns foreground;
                         // local force only without helper). Request activation
-                        // before uncloaking so DWM does not show Acrylic's
+                        // before uncloaking so DWM does not show acrylic's
                         // inactive fallback on the first visible frame.
                         request_foreground(hwnd);
                         if let Some(wv) = webview.as_ref() {

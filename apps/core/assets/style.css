@@ -1,4 +1,11 @@
-/* Nex overlay: DWM supplies desktop blur; CSS adds a restrained glass tint. */
+/* Nex overlay page layer.
+
+   The material is drawn natively, below this page: a Direct3D/Direct2D renderer
+   captures the desktop behind the window, refracts it and paints the pane, rim
+   and shadow (see `overlay::refraction`). The page is transparent there and adds
+   only its own chrome - the search field, rows, menus, the composer - as tiers
+   of tint, rim and sheen. It never uses `backdrop-filter`: a filter here would
+   sample the desktop, not the pane, so the material would be lost twice over. */
 
 @font-face {
   font-family: "InterVariable";
@@ -49,9 +56,7 @@
   --panel-highlight: rgba(255, 255, 255, 0.1);
   --panel-edge: rgba(255, 255, 255, 0.1);
   --panel-glint: rgba(255, 255, 255, 0.06);
-  --panel-sheen: rgba(255, 255, 255, 0.08);
   --panel-reflection: rgba(255, 255, 255, 0.03);
-  --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   /* Glass tiers for the chrome the page draws above the native refractive
      layer. The lens below is the material; these surfaces sit on it, so they
      take a tint, a rim and a sheen - never a backdrop filter of their own,
@@ -80,9 +85,6 @@
   --focus: rgba(255, 255, 255, 0.38);
   --divider: rgba(255, 255, 255, 0.07);
   --kbd-bg: rgba(255, 255, 255, 0.06);
-  --kbd-pill-bg: transparent;
-  --kbd-cap-bg: rgba(255, 255, 255, 0.08);
-  --kbd-cap-border: rgba(0, 0, 0, 0.35);
   --icon-bg: rgba(255, 255, 255, 0.06);
   --text-select: rgba(255, 255, 255, 0.22);
   --knob: #ffffff;
@@ -93,9 +95,6 @@
   --restart: #7dd3a0;
   --shutdown: #f28b82;
   --hover-strong: rgba(255, 255, 255, 0.075);
-  --warn: #ffba5c;
-  --warn-wash: rgba(255, 186, 92, 0.07);
-  --warn-border: rgba(255, 186, 92, 0.34);
   --danger: #e06a6a;
   --danger-wash: rgba(224, 106, 106, 0.09);
   --danger-border: rgba(224, 106, 106, 0.30);
@@ -128,9 +127,6 @@ html[data-theme="light"] {
   --text-dim: #525252;
   --text-faint: #737373;
   --hover-strong: rgba(0, 0, 0, 0.055);
-  --warn: #9a6208;
-  --warn-wash: rgba(154, 98, 8, 0.06);
-  --warn-border: rgba(154, 98, 8, 0.26);
   --danger: #b4342f;
   --danger-wash: rgba(180, 52, 47, 0.07);
   --danger-border: rgba(180, 52, 47, 0.24);
@@ -148,9 +144,6 @@ html[data-theme="light"] {
   --focus: rgba(0, 0, 0, 0.32);
   --divider: rgba(0, 0, 0, 0.065);
   --kbd-bg: rgba(0, 0, 0, 0.045);
-  --kbd-pill-bg: transparent;
-  --kbd-cap-bg: #ffffff;
-  --kbd-cap-border: rgba(0, 0, 0, 0.12);
   --icon-bg: rgba(0, 0, 0, 0.045);
   --text-select: rgba(0, 0, 0, 0.14);
   --lock: #2f63d6;
@@ -166,9 +159,7 @@ html[data-native-material="acrylic"] {
   --panel-highlight: rgba(255, 255, 255, 0.24);
   --panel-edge: rgba(255, 255, 255, 0.2);
   --panel-glint: rgba(255, 255, 255, 0.12);
-  --panel-sheen: rgba(255, 255, 255, 0.075);
   --panel-reflection: rgba(255, 255, 255, 0.035);
-  --panel-bottom-edge: rgba(0, 0, 0, 0.3);
 }
 
 html[data-theme="light"][data-native-material="acrylic"] {
@@ -176,9 +167,7 @@ html[data-theme="light"][data-native-material="acrylic"] {
   --panel-highlight: rgba(255, 255, 255, 0.88);
   --panel-edge: rgba(255, 255, 255, 0.72);
   --panel-glint: rgba(255, 255, 255, 0.32);
-  --panel-sheen: rgba(255, 255, 255, 0.22);
   --panel-reflection: rgba(255, 255, 255, 0.12);
-  --panel-bottom-edge: rgba(55, 72, 101, 0.14);
 }
 
 * {
@@ -2501,9 +2490,7 @@ html.glass-native.glass-light {
   --panel-highlight: rgba(255, 255, 255, 0.65);
   --panel-edge: rgba(0, 0, 0, 0.1);
   --panel-glint: rgba(255, 255, 255, 0.25);
-  --panel-sheen: rgba(255, 255, 255, 0.1);
   --panel-reflection: rgba(255, 255, 255, 0.045);
-  --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
   /* Opaque surfaces carry the restrained tokens; a translucent one needs
@@ -2522,8 +2509,6 @@ html.glass-native.glass-light {
   --focus: rgba(0, 0, 0, 0.36);
   --divider: rgba(0, 0, 0, 0.08);
   --kbd-bg: rgba(0, 0, 0, 0.055);
-  --kbd-cap-bg: #ffffff;
-  --kbd-cap-border: rgba(0, 0, 0, 0.15);
   --icon-bg: rgba(0, 0, 0, 0.05);
   --text-select: rgba(0, 0, 0, 0.18);
 }
@@ -2538,9 +2523,7 @@ html.glass-native.glass-dark {
   --panel-highlight: rgba(255, 255, 255, 0.22);
   --panel-edge: rgba(255, 255, 255, 0.12);
   --panel-glint: rgba(255, 255, 255, 0.12);
-  --panel-sheen: rgba(255, 255, 255, 0.1);
   --panel-reflection: rgba(255, 255, 255, 0.045);
-  --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
   /* Opaque surfaces carry the restrained tokens; a translucent one needs
@@ -2559,8 +2542,6 @@ html.glass-native.glass-dark {
   --focus: rgba(255, 255, 255, 0.42);
   --divider: rgba(255, 255, 255, 0.08);
   --kbd-bg: rgba(255, 255, 255, 0.08);
-  --kbd-cap-bg: rgba(255, 255, 255, 0.1);
-  --kbd-cap-border: rgba(0, 0, 0, 0.35);
   --icon-bg: rgba(255, 255, 255, 0.06);
   --text-select: rgba(255, 255, 255, 0.28);
 }
@@ -2619,20 +2600,13 @@ html.glass-fading {
 }
 
 /* Curved lighting, inner shade and fine dither live in D2D beneath the
-   page. What D2D cannot do is sit *above* the text, so the top-edge light
-   lives here: a real material is lit from above, and a pane whose only edge
-   treatment is an even hairline reads as a sticker rather than a thick body.
-
-   Two parts, both drawn over the content the way a specular is: a short
-   gradient band at the top edge, and an inset hairline that brightens only the
-   top border. It is deliberately the weakest of the surface layers - the
-   gradient starts at --panel-sheen (10%) and is gone by 12% of the height, so
-   it lifts a row of text without washing it out. */
-/* The material has no CSS face at all: no inset highlight, no border. Both used
-   to stand in for a rim, and both were light painted over an image - the exact
-   thing the effect graph now does properly, by bending and reflecting the
-   desktop. CSS cannot sample what is behind the window, so anything it draws
-   here is decoration laid on top of the real material. */
+   page. The material has no CSS face at all: no inset highlight, no border.
+   Both used to stand in for a rim, and both were light painted over an image -
+   the exact thing the effect graph now does properly, by bending and reflecting
+   the desktop. CSS cannot sample what is behind the window, so anything it
+   draws here is decoration laid on top of the real material. What the page
+   does add is the chrome it owns - see the glass tiers above `--glass-thin`,
+   which carry a tint, a 1 px rim and a `--panel-glint` sheen over content. */
 
 @media (prefers-reduced-motion: reduce) {
   html.glass-fading, html.glass-fading * { transition: none !important; }

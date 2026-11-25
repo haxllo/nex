@@ -1704,18 +1704,12 @@ impl RuntimeWorker {
             &mut self.background_index_refresh,
             &self.runtime_config,
         );
-        if self.background_index_refresh.cache_applied {
-            if let Ok(svc) = self.service.try_write() {
-                let ui_process = std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1");
-                if !ui_process {
-                    svc.start_stale_pruner(&self.service);
-                    if let Err(error) = svc.start_file_watchers(&self.service) {
-                        log_warn(&format!("[nex] directory_watcher start failed: {error}"));
-                    }
-                    svc.start_application_watchers(&self.service);
-                }
-            }
-        }
+        // No in-process watcher start lives here. Discovery, pruners and file
+        // and app watchers belong to NexIndexerProcess, which starts them for
+        // itself; the UI only ever searches the snapshot it publishes. The
+        // single-process branch that used to sit here was unreachable anyway
+        // (this binary sets NEX_UI_PROCESS=1 before the loop runs), and had it
+        // ever run it would have broken that boundary.
 
         // Deferred helper regeneration (svc borrow dropped above). The
         // in-process detector stays exactly as it is.
@@ -2509,7 +2503,6 @@ impl RuntimeWorker {
                     &self.runtime_config,
                     &self.background_index_refresh,
                     &self.suppressed_uninstall_titles,
-                    &self.runtime_config.quick_launch.pinned,
                     &mut self.current_results,
                     &mut self.current_rows,
                     &mut self.selected_index,
@@ -3123,7 +3116,6 @@ fn apply_search_results(
     _runtime_config: &Config,
     background_index_refresh: &BackgroundIndexRefresh,
     suppressed_uninstall_titles: &[String],
-    pinned_paths: &[String],
     current_results: &mut Vec<crate::model::SearchItem>,
     current_rows: &mut Vec<crate::overlay::OverlayRow>,
     selected_index: &mut usize,
@@ -3193,23 +3185,14 @@ fn apply_search_results(
         return;
     }
 
-    // Sort pinned items to the top ONLY during idle quick-launch view
-    // (empty query). When query is non-empty, keep natural rank order.
+    // Results keep the ranking the search produced. Pinned ordering is a
+    // property of the idle quick-launch rows (built in runtime_overlay_rows),
+    // not something applied to search results: the sort that used to live here
+    // only ran for an empty query, and the only caller returns early on exactly
+    // that condition, so it could never run in a shipped build.
+    //
+    // Only the parked "Show all apps" gate below reads this.
     let is_idle = overlay.query_text().trim().is_empty();
-    if !pinned_paths.is_empty() && is_idle {
-        let pinned_normalized: Vec<String> = pinned_paths.iter()
-            .map(|p| p.replace('/', "\\").to_ascii_lowercase())
-            .collect();
-        results.sort_by(|a, b| {
-            let a_pinned = pinned_normalized.iter().any(|p| {
-                a.path.replace('/', "\\").to_ascii_lowercase() == *p
-            });
-            let b_pinned = pinned_normalized.iter().any(|p| {
-                b.path.replace('/', "\\").to_ascii_lowercase() == *p
-            });
-            b_pinned.cmp(&a_pinned) // true (pinned) comes before false
-        });
-    }
 
     *current_results = results;
     *selected_index = 0;

@@ -26,6 +26,21 @@ struct UninstallCache {
 
 static UNINSTALL_CACHE: OnceLock<Mutex<UninstallCache>> = OnceLock::new();
 
+/// The registry-only view, for callers that must never start a child process.
+///
+/// Separate from `UNINSTALL_CACHE` on purpose: sharing one cache would let a
+/// publisher lookup seed it with entries that have no Appx rows, and the next
+/// force-free `> uninstall` search would silently lose them.
+static REGISTRY_CACHE: OnceLock<Mutex<UninstallCache>> = OnceLock::new();
+
+/// Counts Appx enumerations, which spawn `powershell.exe`. Test-only, and
+/// thread-local because the suite runs in parallel: a global counter would be
+/// tripped by another test's full load and prove nothing about this one.
+#[cfg(all(test, target_os = "windows"))]
+thread_local! {
+    static APPX_COLLECTOR_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn search_uninstall_actions(query: &str, limit: usize) -> Vec<SearchItem> {
     if limit == 0 {
         return Vec::new();
@@ -104,7 +119,10 @@ pub fn is_display_name_registered(display_name: &str) -> Result<bool, String> {
 }
 
 pub fn publishers_by_display_name() -> Result<HashMap<String, String>, String> {
-    let entries = load_cached_entries(false)?;
+    // Registry only. The Appx rows this used to add carried an empty publisher,
+    // so they contributed nothing here while costing a PowerShell start on
+    // every app index pass.
+    let entries = load_registry_entries_cached()?;
     let mut out = HashMap::new();
     for entry in entries {
         let publisher = entry.publisher.trim();
@@ -145,7 +163,7 @@ pub fn app_path_by_aumid(aumid: &str) -> Option<String> {
     if wanted.is_empty() {
         return None;
     }
-    let entries = load_cached_entries(false).ok()?;
+    let entries = load_registry_entries_cached().ok()?;
     for entry in entries.iter() {
         if !wanted.contains(&normalize_for_search(entry.display_name.as_str())) {
             continue;
@@ -398,6 +416,37 @@ fn load_cached_entries(force_refresh: bool) -> Result<Vec<UninstallEntry>, Strin
     Ok(state.entries.clone())
 }
 
+/// The registry entries alone: three registry walks, no child process.
+fn load_registry_entries() -> Result<Vec<UninstallEntry>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut entries = Vec::new();
+        collect_registry_entries(&mut entries)?;
+        Ok(entries)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+fn load_registry_entries_cached() -> Result<Vec<UninstallEntry>, String> {
+    let cache = REGISTRY_CACHE.get_or_init(|| Mutex::new(UninstallCache::default()));
+    let mut state = cache
+        .lock()
+        .map_err(|_| "uninstall registry cache lock poisoned".to_string())?;
+    let stale = state
+        .loaded_at
+        .map(|loaded| loaded.elapsed() >= UNINSTALL_CACHE_TTL)
+        .unwrap_or(true);
+    if stale {
+        state.entries = load_registry_entries()?;
+        state.loaded_at = Some(Instant::now());
+    }
+    Ok(state.entries.clone())
+}
+
 fn load_entries() -> Result<Vec<UninstallEntry>, String> {
     #[cfg(target_os = "windows")]
     {
@@ -438,20 +487,27 @@ fn execute_entry(_entry: &UninstallEntry) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn load_entries_windows() -> Result<Vec<UninstallEntry>, String> {
+fn collect_registry_entries(
+    entries: &mut Vec<UninstallEntry>,
+) -> Result<(), String> {
     use windows_sys::Win32::System::Registry::{
         HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY,
     };
 
-    let mut entries = Vec::new();
-    collect_entries_from_uninstall_key("hkcu", HKEY_CURRENT_USER, 0, &mut entries)?;
-    collect_entries_from_uninstall_key("hklm", HKEY_LOCAL_MACHINE, 0, &mut entries)?;
+    collect_entries_from_uninstall_key("hkcu", HKEY_CURRENT_USER, 0, entries)?;
+    collect_entries_from_uninstall_key("hklm", HKEY_LOCAL_MACHINE, 0, entries)?;
     collect_entries_from_uninstall_key(
         "hklm32",
         HKEY_LOCAL_MACHINE,
         KEY_WOW64_32KEY,
-        &mut entries,
+        entries,
     )?;
+    Ok(())
+}
+
+fn load_entries_windows() -> Result<Vec<UninstallEntry>, String> {
+    let mut entries = Vec::new();
+    collect_registry_entries(&mut entries)?;
 
     match collect_appx_packages(&mut entries) {
         Ok(()) => {}
@@ -583,6 +639,8 @@ fn collect_entries_from_uninstall_key(
 
 #[cfg(target_os = "windows")]
 fn collect_appx_packages(out: &mut Vec<UninstallEntry>) -> Result<(), String> {
+    #[cfg(test)]
+    APPX_COLLECTOR_CALLS.with(|calls| calls.set(calls.get() + 1));
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
@@ -1102,6 +1160,35 @@ mod tests {
             display_icon: String::new(),
             install_location: String::new(),
         }
+    }
+
+    /// App discovery builds this map on every index pass. It used to go through
+    /// the full loader, whose Appx step starts `powershell.exe` - and the Appx
+    /// rows it added carried no publisher, so discovery paid a cold interpreter
+    /// start for nothing.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_publisher_map_never_enumerates_appx_packages() {
+        // Force the next call to load, so the test observes a real pass rather
+        // than a warm cache left by another test.
+        if let Some(cache) = super::REGISTRY_CACHE.get() {
+            if let Ok(mut state) = cache.lock() {
+                state.loaded_at = None;
+                state.entries.clear();
+            }
+        }
+        super::APPX_COLLECTOR_CALLS.with(|calls| calls.set(0));
+
+        let publishers = super::publishers_by_display_name().expect("registry walk succeeds");
+
+        let calls = super::APPX_COLLECTOR_CALLS.with(|calls| calls.get());
+        assert_eq!(calls, 0, "a publisher lookup must not start a child process");
+        // The registry itself is the source: on any real Windows this is
+        // non-empty, and the assertion above is only meaningful if a load ran.
+        assert!(
+            !publishers.is_empty(),
+            "the registry walk must still find installed programs"
+        );
     }
 
     #[test]

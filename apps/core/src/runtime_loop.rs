@@ -2642,7 +2642,6 @@ impl RuntimeWorker {
                                 self.overlay.hide_now();
                                 self.overlay_state.on_escape();
                                 match execute_action_selection(
-                                    &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                                     &self.runtime_config,
                                     &self.plugin_registry,
                                     uninstall_action,
@@ -2730,7 +2729,6 @@ impl RuntimeWorker {
                                 };
                                 let power_item = SearchItem::new(action_id, "action", "", "");
                                 match execute_action_selection(
-                                    &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                                     &self.runtime_config,
                                     &self.plugin_registry,
                                     &power_item,
@@ -2857,7 +2855,6 @@ impl RuntimeWorker {
                     self.overlay.hide_now();
                     self.overlay_state.on_escape();
                     match execute_action_selection(
-                        &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                         &self.runtime_config,
                         &self.plugin_registry,
                         selected,
@@ -2891,7 +2888,6 @@ impl RuntimeWorker {
                     // the grid is up.
                     let opening_query = self.overlay.query_text().trim().to_string();
                     match execute_action_selection(
-                        &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                         &self.runtime_config,
                         &self.plugin_registry,
                         selected,

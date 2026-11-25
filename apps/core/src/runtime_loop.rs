@@ -654,6 +654,38 @@ struct RuntimeWorker {
     settings_open: bool,
 }
 
+/// Pins whose target is gone are not rendered.
+///
+/// The pin itself stays in `config.toml`: it is user intent, and a path on a
+/// removable drive or a network share comes back when that volume does. What
+/// must not happen is showing a pin that launches nothing - the click would
+/// report neither success nor failure. Reported once per path per process, so
+/// the log says which entries are dead without repeating itself on every show.
+fn pins_that_still_resolve(pins: &[String]) -> Vec<String> {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static REPORTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+    let mut live = Vec::with_capacity(pins.len());
+    for pin in pins {
+        if crate::app_target::launch_target_exists(pin) {
+            live.push(pin.clone());
+            continue;
+        }
+        let reported = REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
+        let Ok(mut reported) = reported.lock() else {
+            continue;
+        };
+        if reported.insert(pin.to_ascii_lowercase()) {
+            log_info(&format!(
+                "[nex] quick_launch: pin '{pin}' no longer resolves; hidden (still in config)"
+            ));
+        }
+    }
+    live
+}
+
 impl RuntimeWorker {
     /// Activate the "Show all apps" entry — synchronous, two-phase, and
     /// order-stable: the currently visible app rows are kept exactly as
@@ -781,7 +813,7 @@ impl RuntimeWorker {
 
     fn load_quick_launch_items(&mut self) {
         let max_items = self.runtime_config.quick_launch.max_items as usize;
-        let pinned = &self.runtime_config.quick_launch.pinned;
+        let pinned = pins_that_still_resolve(&self.runtime_config.quick_launch.pinned);
         log_info(&format!("[nex] quick_launch loading pinned={:?}", pinned));
 
         // Query the database for Quick Launch items. Use try_read so the
@@ -789,7 +821,7 @@ impl RuntimeWorker {
         // the load is retried by the tick when the lock frees up.
         if let Ok(guard) = self.service.try_read() {
             let db = guard.db_ref();
-            match crate::index_store::get_quick_launch_items(&db, pinned, max_items, self.runtime_config.quick_launch.auto_fill) {
+            match crate::index_store::get_quick_launch_items(&db, &pinned, max_items, self.runtime_config.quick_launch.auto_fill) {
                 Ok(items) => {
                     self.quick_launch_items = items
                         .into_iter()
@@ -838,7 +870,7 @@ impl RuntimeWorker {
     fn load_quick_launch_items_from_config(&mut self) {
         let max_items = self.runtime_config.quick_launch.max_items as usize;
         // Use the in-memory pinned list (already updated)
-        let pinned = self.runtime_config.quick_launch.pinned.clone();
+        let pinned = pins_that_still_resolve(&self.runtime_config.quick_launch.pinned);
 
         // Query the database for Quick Launch items
         if let Ok(guard) = self.service.try_read() {
@@ -3372,6 +3404,32 @@ fn looks_like_pin_path(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pin outlives the program it points at, because nothing reconciles
+    /// `config.toml` against the filesystem. Rendering it would produce a row
+    /// that launches nothing and reports nothing, so it is hidden instead - and
+    /// the entry stays in config, because a path on a removed drive comes back.
+    #[test]
+    fn a_pin_whose_target_is_gone_is_not_rendered() {
+        let dir = std::env::temp_dir().join("nex-pin-resolve-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("live.exe");
+        std::fs::write(&live, b"x").unwrap();
+
+        let pins = vec![
+            live.to_string_lossy().to_string(),
+            dir.join("gone.exe").to_string_lossy().to_string(),
+            "https://linear.app/".to_string(),
+        ];
+        let kept = pins_that_still_resolve(&pins);
+
+        assert_eq!(kept.len(), 2, "a dead path must not survive: {kept:?}");
+        assert!(kept.iter().any(|p| p.ends_with("live.exe")));
+        assert!(kept.iter().any(|p| p == "https://linear.app/"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn pin_payload_paths_are_not_titles() {

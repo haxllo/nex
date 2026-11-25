@@ -2331,110 +2331,6 @@ Get-StartApps | ForEach-Object {
 /// The fallback exists so a machine where COM enumeration fails loses speed
 /// rather than 144 app records. It is expected never to run.
 #[cfg(target_os = "windows")]
-/// The `{FOLDERID-…}` prefix of a shell parsing name rendered the same way the
-/// shell writes it, so an enumeration can be compared without parsing GUIDs
-/// back out of text.
-#[cfg(target_os = "windows")]
-fn known_folder_key(guid: &windows::core::GUID) -> String {
-    format!(
-        "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
-        guid.data1,
-        guid.data2,
-        guid.data3,
-        guid.data4[0],
-        guid.data4[1],
-        guid.data4[2],
-        guid.data4[3],
-        guid.data4[4],
-        guid.data4[5],
-        guid.data4[6],
-        guid.data4[7]
-    )
-}
-
-/// Filesystem root of every known folder an AppsFolder parsing name can start
-/// with, resolved through the shell so the result matches this machine's drive
-/// layout instead of a guessed one.
-#[cfg(target_os = "windows")]
-fn known_folder_roots() -> Vec<(String, PathBuf)> {
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::UI::Shell::{
-        FOLDERID_CommonStartMenu, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_LocalAppData,
-        FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesCommon,
-        FOLDERID_ProgramFilesCommonX86, FOLDERID_ProgramFilesX86, FOLDERID_Public,
-        FOLDERID_RoamingAppData, FOLDERID_StartMenu, FOLDERID_System, FOLDERID_SystemX86,
-        FOLDERID_UserProfiles, FOLDERID_Windows, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
-    };
-
-    let ids = [
-        &FOLDERID_System,
-        &FOLDERID_SystemX86,
-        &FOLDERID_ProgramFiles,
-        &FOLDERID_ProgramFilesX86,
-        &FOLDERID_ProgramFilesCommon,
-        &FOLDERID_ProgramFilesCommonX86,
-        &FOLDERID_Windows,
-        &FOLDERID_ProgramData,
-        &FOLDERID_LocalAppData,
-        &FOLDERID_RoamingAppData,
-        &FOLDERID_UserProfiles,
-        &FOLDERID_Desktop,
-        &FOLDERID_Documents,
-        &FOLDERID_StartMenu,
-        &FOLDERID_CommonStartMenu,
-        &FOLDERID_Public,
-    ];
-
-    let mut roots = Vec::with_capacity(ids.len());
-    for id in &ids {
-        // SAFETY: `id` is a live FOLDERID constant and the string returned here
-        // is CoTaskMem-allocated by the shell for this call.
-        let Ok(raw) = (unsafe { SHGetKnownFolderPath(*id, KF_FLAG_DEFAULT, None) }) else {
-            continue;
-        };
-        if raw.is_null() {
-            continue;
-        }
-        // SAFETY: `raw` is NUL terminated and owned by this call.
-        let text = unsafe { raw.to_string() }.ok();
-        // SAFETY: `raw` came from `SHGetKnownFolderPath` and is not used after.
-        unsafe { CoTaskMemFree(Some(raw.0 as *const core::ffi::c_void)) };
-        if let Some(text) = text {
-            roots.push((known_folder_key(*id), PathBuf::from(text)));
-        }
-    }
-    roots
-}
-
-/// Whether an AppsFolder entry still points at something installed.
-///
-/// The shell keeps listing an app after it is uninstalled: the Start-menu
-/// shortcut that produced the entry stays behind with a dead target and the
-/// AppsFolder item keeps resolving to it. Without this check the row outlives
-/// the program, so it stays searchable and pinnable and clicking it hands
-/// Explorer a path that is no longer there. An AppUserModelID activation string
-/// (`Microsoft.WindowsCalculator_8wekyb3d8bbwe!App`) names a package, not a
-/// file, and cannot be checked on disk, so it is kept.
-#[cfg(target_os = "windows")]
-fn shell_app_target_exists(app_id: &str, roots: &[(String, PathBuf)]) -> bool {
-    let trimmed = app_id.trim();
-    let Some(close) = trimmed.starts_with('{').then(|| trimmed.find('}')).flatten() else {
-        // The absolute-path form: `shell:AppsFolder\C:\…\App.exe`.
-        let path = Path::new(trimmed);
-        return !path.is_absolute() || path.exists();
-    };
-
-    let guid_text = &trimmed[..=close];
-    let tail = trimmed[close + 1..].trim_start_matches('\\');
-    match roots
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(guid_text))
-    {
-        Some((_, root)) if !tail.is_empty() => root.join(tail).exists(),
-        _ => true,
-    }
-}
-
 fn discover_start_apps(
     uninstall_publishers: &HashMap<String, String>,
 ) -> Result<Vec<SearchItem>, ProviderError> {
@@ -2446,7 +2342,7 @@ fn discover_start_apps(
         return discover_start_apps_via_powershell(uninstall_publishers);
     }
 
-    let folder_roots = known_folder_roots();
+    let folder_roots = crate::app_target::known_folder_roots();
     let mut dropped_missing_targets = 0usize;
     let mut items = Vec::new();
     for (name, app_id) in apps {
@@ -2455,7 +2351,7 @@ fn discover_start_apps(
         if title.is_empty() || app_id.is_empty() {
             continue;
         }
-        if !shell_app_target_exists(app_id, &folder_roots) {
+        if !crate::app_target::shell_app_target_exists(app_id, &folder_roots) {
             dropped_missing_targets += 1;
             continue;
         }
@@ -3019,48 +2915,6 @@ fn is_excluded_windows_kits_shortcut_reference(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Uninstalling a program leaves its Start-menu shortcut behind with a dead
-    /// target, and the shell keeps listing the resulting AppsFolder entry. The
-    /// row then outlives the program: it stays searchable, and clicking it hands
-    /// Explorer a path that no longer exists, which it answers by opening the
-    /// Documents folder.
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn an_apps_folder_entry_with_no_target_is_dropped() {
-        use windows::Win32::UI::Shell::FOLDERID_ProgramFilesX86;
-
-        let dir = std::env::temp_dir().join("nex-apps-folder-target-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("here.exe"), b"x").unwrap();
-
-        let roots = vec![(
-            known_folder_key(&FOLDERID_ProgramFilesX86),
-            dir.clone(),
-        )];
-        let key = roots[0].0.clone();
-
-        assert!(shell_app_target_exists(&format!("{key}\\here.exe"), &roots));
-        assert!(!shell_app_target_exists(&format!("{key}\\gone.exe"), &roots));
-        // The absolute-path form of the same entry.
-        let here = dir.join("here.exe").to_string_lossy().to_string();
-        let gone = dir.join("gone.exe").to_string_lossy().to_string();
-        assert!(shell_app_target_exists(&here, &roots));
-        assert!(!shell_app_target_exists(&gone, &roots));
-        // A package activation id names no file and is kept.
-        assert!(shell_app_target_exists(
-            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
-            &roots
-        ));
-        // An unknown known-folder id cannot be checked, so it is kept.
-        assert!(shell_app_target_exists(
-            "{00000000-0000-0000-0000-000000000000}\\gone.exe",
-            &roots
-        ));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// The `App Paths` provider used to run a PowerShell script whose registry
     /// paths had lost their backslashes, so every `Get-ChildItem` resolved

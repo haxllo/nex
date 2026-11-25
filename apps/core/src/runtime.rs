@@ -712,6 +712,27 @@ mod tests {
         assert_eq!(results[1].title, "Cancel");
     }
 
+    /// Right-click Uninstall resolves the row title to the first registry entry
+    /// whose display name merely resembles it (CIQ-254). Whatever that match is,
+    /// the confirmation must name it - otherwise the user approves removing one
+    /// program and a different one is removed.
+    #[test]
+    fn a_fuzzy_uninstall_match_is_named_before_it_runs() {
+        let matched = SearchItem::new(
+            "action:uninstall:spotify-radio",
+            "action",
+            "Uninstall Spotify Radio Classic",
+            "Vendor application",
+        );
+        let results = uninstall_confirmation_results(&matched);
+        assert_eq!(results[0].id, ACTION_UNINSTALL_CONFIRM_ID);
+        assert!(
+            results[0].title.contains("Spotify Radio Classic"),
+            "the confirm row must name the program that matched, got {:?}",
+            results[0].title
+        );
+    }
+
     #[test]
     fn suppressed_uninstall_results_are_filtered_from_results() {
         let mut results = vec![

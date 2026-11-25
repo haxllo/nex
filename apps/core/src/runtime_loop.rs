@@ -1467,40 +1467,33 @@ impl RuntimeWorker {
                 if _title.is_empty() { return; }
                 let items = crate::uninstall_registry::search_uninstall_actions_for_title(_title, 5);
                 if let Some(item) = items.first() {
-                    log_info(&format!("[nex] uninstalling '{}' via command '{}'", _title, item.id));
-                    match crate::uninstall_registry::execute_uninstall_action(&item.id) {
-                        Ok(()) => {
-                            track_uninstall_title_suppression(
-                                &mut self.suppressed_uninstall_titles,
-                                &format!("Uninstall {}", _title),
-                            );
-                            let lookup = if !path.is_empty() { path.to_string() } else { _title.to_string() };
-                            if let Ok(guard) = self.service.write() {
-                                // One method, one connection lock. Looking the
-                                // row up through `db_ref()` and then deleting
-                                // it locked the same mutex twice.
-                                let _ = guard.delete_item_by_path_or_title(&lookup);
-                            }
-                            filter_suppressed_uninstall_results(&mut self.current_results, &self.suppressed_uninstall_titles);
-                            if self.current_results.is_empty() {
-                                set_status_row_overlay_state(&self.overlay, STATUS_ROW_NO_RESULTS);
-                            } else {
-                                let rows = overlay_rows_ext(
-                                    &self.current_results,
-                                    false,
-                                    SHOW_ALL_APPS_ENTRY,
-                                );
-                                self.current_rows = rows;
-                                self.overlay.set_results(&self.current_rows, self.selected_index.min(self.current_results.len().saturating_sub(1)));
-                            }
-                            self.overlay.set_status_text(&format!("Uninstalling '{}'...", _title));
-                        }
-                        Err(error) => {
-                            let msg = format!("Uninstall failed: {error}");
-                            log_warn(&format!("[nex] {msg}"));
-                            self.overlay.set_status_text(&msg);
-                        }
-                    }
+                    // The match is fuzzy - it is the first registry entry whose
+                    // display name resembles the row that was right-clicked -
+                    // and uninstalling the wrong program cannot be undone. So
+                    // this takes the same confirmation as the typed path, and
+                    // the confirm row names the program that actually matched,
+                    // which is how a wrong match becomes visible before it runs.
+                    log_info(&format!(
+                        "[nex] context uninstall '{}' matched '{}'; asking to confirm",
+                        _title, item.title
+                    ));
+                    let parsed_query = ParsedQuery::parse(
+                        self.overlay.query_text().trim(),
+                        self.runtime_config.search_dsl_enabled,
+                    );
+                    self.pending_confirmation = Some(PendingConfirmation {
+                        kind: ConfirmationKind::Uninstall,
+                        uninstall_action: Some(item.clone()),
+                        previous_results: self.current_results.clone(),
+                        previous_selected_index: self.selected_index,
+                        previous_command_mode: parsed_query.command_mode,
+                    });
+                    self.current_results = uninstall_confirmation_results(item);
+                    self.selected_index = 0;
+                    self.current_rows = overlay_rows(&self.current_results, true);
+                    self.overlay.set_results(&self.current_rows, self.selected_index);
+                    self.overlay.set_status_text("");
+                    return;
                 } else {
                     // No uninstall command for this row. The user still asked
                     // to remove it, so take them to the page that can, instead

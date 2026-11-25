@@ -62,7 +62,9 @@ Right-click any row for its actions:
 | Uninstall | Installed applications |
 
 Pinned applications appear in Quick Launch, the idle list, in the order you
-pinned them. Unpinning removes the row.
+pinned them. Unpinning removes the row. A pinned path that no longer exists is
+hidden rather than shown broken, but the pin itself stays in your config, so a
+program on a drive you reconnect comes back without pinning it again.
 
 ## Quick Launch
 

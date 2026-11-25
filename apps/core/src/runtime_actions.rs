@@ -106,7 +106,7 @@ pub(crate) fn launch_overlay_selection(
 
     let selected = &results[selected_index];
     if selected.kind.eq_ignore_ascii_case("action") {
-        return execute_action_selection(service, cfg, plugins, selected, overlay);
+        return execute_action_selection(cfg, plugins, selected, overlay);
     }
     if selected.kind.eq_ignore_ascii_case("clipboard") {
         return clipboard_history::copy_result_to_clipboard(cfg, &selected.id)
@@ -130,9 +130,15 @@ pub(crate) fn launch_overlay_selection(
 /// Returns Ok(reset_session) where reset_session=false means the action
 /// set up a special view (e.g. clipboard history bento) that should not
 /// be cleared by the post-action session reset.
+///
+/// Deliberately takes no `CoreService`: it launches things and never reads or
+/// writes the index. Callers used to pass `&*self.service.write()` inline in the
+/// `match` scrutinee below, which keeps that guard alive for the whole `match`
+/// (temporaries in a scrutinee live to the end of the match), so the arm's own
+/// `self.service.write()` deadlocked the runtime thread and the panel never
+/// opened again. Do not reintroduce a service parameter here.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn execute_action_selection(
-    _service: &CoreService,
     cfg: &Config,
     plugins: &PluginRegistry,
     selected: &SearchItem,

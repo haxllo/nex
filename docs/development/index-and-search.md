@@ -42,6 +42,17 @@ name, which is the same list `Get-StartApps` reports. No part of an app pass
 starts PowerShell; `Get-StartApps` remains only as a fallback for the case where
 the namespace enumerates nothing, and is expected never to run.
 
+An AppsFolder entry is also checked against the filesystem before it becomes an
+app row. Uninstalling a program leaves its Start-menu shortcut behind with a dead
+target, and the shell keeps listing the entry, so without that check the app
+stayed searchable after it was gone and clicking it handed Explorer a path that
+no longer existed - which it answers by opening the Documents folder. A parsing
+name of the form `{FOLDERID-...}\relative\path` or `C:\…\App.exe` is resolved
+and dropped when the target is missing; a bare AppUserModelID
+(`…_8wekyb3d8bbwe!App`) names a package rather than a file and is kept. The
+filter runs every pass, and its schema stamp is bumped whenever the filtering
+changes so a cached app list cannot keep the stale rows.
+
 An application pass is skipped while its stamp is younger than the reconcile
 interval, so a change here does not show up until the stamp is cleared or the
 interval elapses.

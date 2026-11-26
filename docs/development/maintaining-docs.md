@@ -78,6 +78,11 @@ In CI the same switch is read from the pull request body. Put this line in it:
 NEX_ALLOW_STALE_DOCS=1: <why the document is unaffected>
 ```
 
+On a push to `master`, the gate also reads the body of the pull request that
+produced the commit, because a squash merge does not carry the PR body into the
+commit message. A direct push has no pull request, so its commit message is the
+record.
+
 The reason is not optional. A bare `NEX_ALLOW_STALE_DOCS=1` with nothing after
 the colon fails the gate, because a bypass with no stated judgment is
 indistinguishable from an oversight, and the next reader cannot tell which one

@@ -1,7 +1,16 @@
 name: CI
 
 on:
+  # Branches run once, on the pull request: that is the gate, and it is the only
+  # event that carries the PR body the docs-bypass check reads. Pushing the same
+  # branch also fired a second full run on the push event, which doubled the CI
+  # minutes and could show one red check next to a green one on the same commit
+  # when a flaky test hit only one of them.
+  #
+  # Master keeps its push run: it is the post-merge verification, and the release
+  # notes describe ci.yml as running on every push.
   push:
+    branches: [master]
   pull_request:
 
 concurrency:

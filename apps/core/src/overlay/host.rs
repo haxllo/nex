@@ -2500,7 +2500,9 @@ fn build_webview(
         .and_then(|s| match s.panel_background {
             crate::config::PanelBackground::Black => Some(OPAQUE_DARK_RGBA),
             crate::config::PanelBackground::White => Some(OPAQUE_LIGHT_RGBA),
-            crate::config::PanelBackground::Glass => None,
+            // Both translucent modes are drawn by the GPU layer, so the WebView
+            // surface stays transparent and text is grayscaled in both.
+            crate::config::PanelBackground::Glass | crate::config::PanelBackground::Acrylic => None,
         });
     // The acrylic CSS override (transparent panel-surface) must also stay
     // glass-only: injected in an opaque mode it puts all text over a
@@ -3141,10 +3143,46 @@ fn glass_transition(active: bool, applied: Option<bool>) -> Option<bool> {
 /// square borders) until a restart. Re-engaging re-clips the rounded
 /// region and wakes the renderer; its next frame lifts the cloak
 /// (GlassPresented). Only fires on a change — Apply runs per keystroke.
+/// Tell the renderer which look to draw.
+///
+/// Glass is the lens; Acrylic is the same capture and the same silhouette with
+/// the lens stages switched off (see `refraction::PanelMaterial`). The renderer
+/// defaults to the lens, so nothing here can change how glass looks — this only
+/// ever picks between two look constant sets.
+fn sync_glass_material(
+    glass_layer: &Option<crate::overlay::refraction::GlassLayer>,
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
+) {
+    static APPLIED: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+    let acrylic = matches!(
+        effective_panel_mode(state),
+        crate::config::PanelBackground::Acrylic
+    );
+    let wanted = i8::from(acrylic);
+    if APPLIED.load(Ordering::SeqCst) == wanted {
+        return;
+    }
+    let Some(layer) = glass_layer.as_ref() else { return };
+    APPLIED.store(wanted, Ordering::SeqCst);
+    let material = if acrylic {
+        crate::overlay::refraction::PanelMaterial::Acrylic
+    } else {
+        crate::overlay::refraction::PanelMaterial::Lens
+    };
+    layer.set_material(material);
+    crate::logging::info(&format!(
+        "[nex] glass material set to {}",
+        if acrylic { "acrylic" } else { "lens" }
+    ));
+}
+
 fn sync_glass_layer(
     glass_layer: &Option<crate::overlay::refraction::GlassLayer>,
     state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
 ) {
+    // Which material the layer draws. Cheap (a compare against the last value
+    // sent) and idempotent, so it can run on every Show/Apply.
+    sync_glass_material(glass_layer, state);
     static APPLIED: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
     let active = glass_active(state);
     let applied = match APPLIED.load(Ordering::SeqCst) {
@@ -3296,7 +3334,7 @@ fn sync_webview_background(
     let color: wry::RGBA = match mode {
         crate::config::PanelBackground::Black => OPAQUE_DARK_RGBA,
         crate::config::PanelBackground::White => OPAQUE_LIGHT_RGBA,
-        crate::config::PanelBackground::Glass => (0, 0, 0, 0),
+        crate::config::PanelBackground::Glass | crate::config::PanelBackground::Acrylic => (0, 0, 0, 0),
     };
     match wv.set_background_color(color) {
         Ok(()) => {

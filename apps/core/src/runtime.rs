@@ -265,7 +265,8 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         let surface = match runtime_config.panel_background {
             config::PanelBackground::Black => "0xFF000000",
             config::PanelBackground::White => "0xFFFFFFFF",
-            config::PanelBackground::Glass => "0x00000000",
+            // Glass and Acrylic are both drawn by the GPU layer.
+            config::PanelBackground::Glass | config::PanelBackground::Acrylic => "0x00000000",
         };
         unsafe {
             std::env::set_var("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", surface);

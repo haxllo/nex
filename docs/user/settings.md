@@ -30,7 +30,7 @@ These are the keys people change first.
 | `max_results` | `20` | Rows shown per query, 5 to 100 |
 | `show_files` | `true` | Include files in results |
 | `show_folders` | `true` | Include folders in results |
-| `panel_background` | `"glass"` | `glass`, `black`, or `white` |
+| `panel_background` | `"glass"` | `glass`, `acrylic`, `black`, or `white`. `glass` refracts the desktop behind the panel and bends at its edges; `acrylic` frosts the same backdrop with no lens — a tinted, evenly blurred sheet; `black` and `white` are opaque. |
 | `view_mode` | `"compact"` | `compact` is a bare search field until you type; `expanded` shows the idle app list |
 | `grid_view` | `false` | Tiles for applications when on. Files, folders, and actions always stay as rows. |
 | `game_mode_enabled` | `false` | Suppress the hotkey while a fullscreen game has focus |

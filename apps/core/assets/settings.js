@@ -327,6 +327,8 @@ document.addEventListener("keydown", (e) => {
 let systemTheme = "dark";
 
 function applyPanelTheme(panel) {
+  // Only the opaque panels force a palette; glass and acrylic both follow the
+  // system theme, because what sits behind them is the user's wallpaper.
   document.documentElement.dataset.theme =
     panel === "white" ? "light" : panel === "black" ? "dark" : systemTheme;
 }

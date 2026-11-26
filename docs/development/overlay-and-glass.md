@@ -84,6 +84,37 @@ row read as active.
 | `forced-colors: active` | Surfaces become `Canvas` with a `CanvasText` border |
 | Opaque panel modes | The page paints its own background; the tiers are already on an opaque surface |
 
+## Acrylic: the same silhouette, no lens
+
+`panel_background = "acrylic"` draws on the same GPU layer as glass, from the
+same capture, the same frost pyramid and the same `rounded_mask`. Only the look
+constants differ (`glass_ps::Look::acrylic` versus `Look::clear`): the bend, the
+colour split and the middle zoom are zero, the frost is much wider
+(`ACRYLIC_BLUR`), and the wash is lifted, because on the lens the bend and the rim
+carry the edge and here there is nothing else between the text and the wallpaper.
+
+There is no rim light. The lens rim is directional — lit from one corner and
+faded around the outline — which is what makes a lens read as a bevel; on a flat
+sheet the same term leaves the border thin on one side and gone on the other. So
+acrylic draws its edge the way the opaque themes do, as a uniform 1 px inset
+outline on the page (`html.bg-acrylic #panel::after`), and the shader's rim terms
+stay at zero.
+
+The mode is held in `refraction::PanelMaterial` and sent through the existing
+`GlassConfig` channel, so switching material never rebuilds the effect graph and
+never touches a lens constant. That is what keeps the corners identical: they are
+part of the shared mask, not a per-material clip. `PanelBackground::is_opaque()`
+returns false for acrylic — reporting it opaque parks the layer and leaves the
+panel solid.
+
+Acrylic needs the same conditions as glass (desktop duplication available,
+transparency not reduced). When those fail, `effective_panel_mode` falls back to
+the opaque panel for the current theme, exactly as it does for glass.
+
+One known gap: the D2D effect-graph fallback (used only when the HLSL shader
+fails to compile) still draws the lens, so acrylic would look like glass there.
+That path is a startup-failure path, not a mode.
+
 ## Why the first show can be slightly slower
 
 The glass reveals only after a presented frame that matches the panel's real size.

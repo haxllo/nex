@@ -2,7 +2,8 @@
   [string]$Version,
   [string]$PreviousTag,
   [string]$OutputPath,
-  [string]$Notes
+  [string]$Notes,
+  [string]$OwnerEmail
 )
 
 # Drafts docs/releases/v<ver>-notes.md from the commit log since the previous
@@ -47,7 +48,7 @@ try {
   }
 
   $range = "$PreviousTag..HEAD"
-  $commits = git log $range --pretty=format:"%h%x09%s"
+  $commits = git log $range --pretty=format:"%h%x09%an%x09%ae%x09%s"
   if ($LASTEXITCODE -ne 0) {
     throw "git log $range failed."
   }
@@ -63,21 +64,45 @@ try {
   # does not appear in the notes a user reads.
   $skipPattern = '^(Merge |Revert |fixup!|squash!|docs:|chore:|test:)'
 
-  # A commit subject is free text and can contain an "@name" - "call the winget
-  # script explicitly instead of splatting @args" was published as a live
-  # GitHub mention, so a stranger with that username was notified about our
-  # release. The sigil becomes an HTML entity: it renders as "@args" exactly as
-  # written, and the mention parser never sees an account to link or ping.
+  # Free text a commit subject can contain - "splatting @args" - must not become a
+  # live mention, which links and notifies whoever holds that handle. An HTML
+  # entity does NOT stop it (GitHub resolves the entity, then linkifies), and
+  # neither does a backslash; a zero-width space after the sigil does, and renders
+  # identically. Verified against POST /markdown.
   function ConvertTo-MentionSafe([string]$text) {
     if (-not $text) { return $text }
-    return ($text -replace '@', '&#64;')
+    return ($text -replace '@', "@$([char]0x200B)")
+  }
+
+  # Credit for a commit that is not the owner's. A contributor's handle is a real
+  # mention on purpose - that is the point of naming them - so it is the one place
+  # an @ is left alone. Derived from a GitHub noreply address when the commit uses
+  # one, else asked of the API, else the plain name.
+  $owner = if ($OwnerEmail) { $OwnerEmail } elseif ($env:NEX_OWNER_EMAIL) { $env:NEX_OWNER_EMAIL } else { 'mshabeeburrahman786@gmail.com' }
+  $repoSlug = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { (gh repo view --json nameWithOwner -q .nameWithOwner 2>$null) }
+  $loginCache = @{}
+  function Resolve-GitHubLogin([string]$email, [string]$sha) {
+    if ($loginCache.ContainsKey($email)) { return $loginCache[$email] }
+    $login = $null
+    if ($email -match '^(?:\d+\+)?([^@+]+)@users\.noreply\.github\.com$') { $login = $matches[1] }
+    elseif ($repoSlug -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+      try {
+        $found = (gh api "repos/$repoSlug/commits/$sha" --jq '.author.login' 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $found -and $found -ne 'null') { $login = $found }
+      }
+      catch { $login = $null }
+    }
+    $loginCache[$email] = $login
+    return $login
   }
 
   foreach ($line in $commits) {
     if (-not $line) { continue }
-    $parts = $line -split "`t", 2
+    $parts = $line -split "`t", 4
     $sha = $parts[0]
-    $subject = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+    $authorName = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+    $authorEmail = if ($parts.Count -gt 2) { $parts[2] } else { "" }
+    $subject = if ($parts.Count -gt 3) { $parts[3] } else { "" }
     if ($subject -match $skipPattern) { continue }
 
     # "type(scope): summary" -> scope + summary; anything else stays whole.
@@ -113,11 +138,19 @@ try {
       $item = "- $clean"
     }
     $item = ConvertTo-MentionSafe $item
+    # Credit whoever wrote the commit, when it is not the owner. The owner's own
+    # commits are the vast majority and naming them on every line is noise.
+    $credit = ""
+    if ($authorEmail -and $authorEmail -ne $owner) {
+      $login = Resolve-GitHubLogin $authorEmail $sha
+      $who = if ($login) { "@$login" } else { ConvertTo-MentionSafe $authorName }
+      if ($who) { $credit = " - $who" }
+    }
     # `$null -ne` rather than truthiness: an empty List[string] evaluates to
     # $false in PowerShell, so `if ($bucket)` sent every typed commit to the
     # untyped list until each bucket already had an entry.
     if ($null -ne $bucket) { $bucket.Add($item) } else { $untyped.Add($item) }
-    $log.Add("- [``$sha``](https://github.com/haxllo/nex/commit/$sha) $(ConvertTo-MentionSafe $subject)")
+    $log.Add("- [``$sha``](https://github.com/haxllo/nex/commit/$sha) $(ConvertTo-MentionSafe $subject)$credit")
   }
 
   $counts = @()

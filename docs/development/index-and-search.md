@@ -53,9 +53,15 @@ and dropped when the target is missing; a bare AppUserModelID
 filter runs every pass, and its schema stamp is bumped whenever the filtering
 changes so a cached app list cannot keep the stale rows.
 
-An application pass is skipped while its stamp is younger than the reconcile
-interval, so a change here does not show up until the stamp is cleared or the
-interval elapses.
+An application pass is skipped while its stamp is unchanged and the last scan is
+recent, so the stamp has to be able to see an install. It carries each Start-menu
+root's modification time for that reason: a new shortcut changes it. The app
+watcher also forgets the provider's stamp on any change it observes, so a pass
+runs immediately rather than waiting for the window to elapse. Both were needed -
+with only the reconcile window, installing a program could take half an hour to
+appear, which reads as "needs a restart". The provider window and the watcher's
+reconcile are both ten minutes; a full app pass is a few hundred milliseconds, so
+agreeing with the watcher is cheap.
 
 Executable publishers come from each file's own version resource
 (`\StringFileInfo\<lang><codepage>\CompanyName`), read in process. That reader

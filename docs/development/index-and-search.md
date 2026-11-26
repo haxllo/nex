@@ -127,6 +127,16 @@ The stores are rebuilt if either is missing or unreadable. Deleting
 
 ## Seeding a keystroke
 
+A one- or two-letter query keeps a floor of app hits in front of its seed
+(`SHORT_QUERY_APP_FLOOR = 24` in `tantivy_search.rs`). One Tantivy query over
+the whole index ranks by BM25, and the index holds far more file paths
+containing a letter than app names starting with it, so a single letter could
+return a handful of apps - or none - while files and folders listed normally.
+The floor runs the same prefix query with `kind` fixed to `app` and puts those
+hits first; the UI truncates the seed before ranking, so an app that is absent
+or late in the seed is an app the user never sees. The seed limit is unchanged
+on purpose: a larger limit admits more files and pays the keystroke cost again.
+
 Each keystroke asks the indexer for candidates (`search_seed`) under a 500 ms
 budget. If the budget expires, the answer is empty, or the call fails, the UI
 ranks its own hot cache instead, which is a much smaller set. That fallback used

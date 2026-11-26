@@ -1071,6 +1071,19 @@ impl RuntimeWorker {
         }
     }
 
+    /// Report a launch/action failure to the user.
+    ///
+    /// The launch paths hide the panel before they start the target, so the
+    /// target window can take the foreground. On failure that leaves the
+    /// status line on a window nobody can see: the panel vanishes and nothing
+    /// opens. Re-show it with the message instead, and put `OverlayState` back
+    /// in step — the caller has already flipped it to "hidden" via
+    /// `on_escape()`, so leaving it there desyncs Escape and the hotkey toggle
+    /// from the window that is now on screen.
+    fn report_action_failure(&mut self, message: &str) {
+        report_failed_action(&self.overlay, &mut self.overlay_state, message);
+    }
+
     fn launch_quick_launch_item(&mut self, path: &str) {
         let Some(item) = self.quick_launch_items.iter().find(|item| item.path == path) else {
             return;
@@ -1106,7 +1119,7 @@ impl RuntimeWorker {
                 self.search_worker.clear_session();
             }
             Err(error) => {
-                self.overlay.set_status_text(&format!("Launch error: {error}"));
+                self.report_action_failure(&format!("Launch error: {error}"));
             }
         }
     }
@@ -1465,7 +1478,7 @@ impl RuntimeWorker {
                         self.search_worker.clear_session();
                     }
                     Err(error) => {
-                        self.overlay.set_status_text(&format!("Run as admin error: {error}"));
+                        self.report_action_failure(&format!("Run as admin error: {error}"));
                     }
                 }
             }
@@ -1495,7 +1508,7 @@ impl RuntimeWorker {
                         self.search_worker.clear_session();
                     }
                     Err(error) => {
-                        self.overlay.set_status_text(&format!("Open location error: {error}"));
+                        self.report_action_failure(&format!("Open location error: {error}"));
                     }
                 }
             }
@@ -1574,8 +1587,9 @@ impl RuntimeWorker {
                             self.search_worker.clear_session();
                         }
                         Err(error) => {
-                            self.overlay
-                                .set_status_text(&format!("Could not open installed apps: {error}"));
+                            self.report_action_failure(&format!(
+                                "Could not open installed apps: {error}"
+                            ));
                         }
                     }
                 }
@@ -1924,6 +1938,13 @@ impl RuntimeWorker {
                         reconcile_suppressed_uninstall_titles(
                             &mut self.suppressed_uninstall_titles,
                         );
+                        // Drop any stale status before the panel comes back.
+                        // `hide*()` clears it, so a message can only be
+                        // lingering from something set after the window went
+                        // away (a failed launch, which now re-shows itself).
+                        // ExternalShow does the same, so both show paths agree
+                        // on what carries over between sessions: nothing.
+                        self.overlay.set_status_text("");
                         // Reveal first. Everything below this line can page in
                         // after a long idle (a SQLite read, an icon lookup, a
                         // warm pass over the index), and doing any of it before
@@ -2630,9 +2651,9 @@ impl RuntimeWorker {
                             ) {
                                 Ok(()) => {}
                                 Err(error) => {
-                                    self.overlay.show_and_focus();
-                                    self.overlay
-                                        .set_status_text(&format!("Copy failed: {error}"));
+                                    self.report_action_failure(&format!(
+                                        "Copy failed: {error}"
+                                    ));
                                 }
                             }
                             reset_overlay_session(
@@ -2808,9 +2829,9 @@ impl RuntimeWorker {
                                             );
                                         } else {
                                             self.pending_confirmation = Some(pending);
-                                            self.overlay.show_and_focus();
-                                            self.overlay
-                                                .set_status_text(&format!("Launch error: {error}"));
+                                            self.report_action_failure(&format!(
+                                                "Launch error: {error}"
+                                            ));
                                         }
                                     }
                                 }
@@ -2846,8 +2867,7 @@ impl RuntimeWorker {
                                     }
                                     Err(_) => {
                                         self.pending_confirmation = Some(pending);
-                                        self.overlay.show_and_focus();
-                                        self.overlay.set_status_text("Power action failed");
+                                        self.report_action_failure("Power action failed");
                                     }
                                 }
                             }
@@ -2977,8 +2997,7 @@ impl RuntimeWorker {
                             }
                         }
                         Err(error) => {
-                            self.overlay.show_and_focus();
-                            self.overlay.set_status_text(&format!("Action failed: {error}"));
+                            self.report_action_failure(&format!("Action failed: {error}"));
                         }
                     }
                     return;
@@ -3022,7 +3041,10 @@ impl RuntimeWorker {
 
                 self.overlay.hide_sync();
                 self.overlay_state.on_escape();
-                match launch_overlay_selection(
+                // The service read guard would otherwise live until the end of
+                // the match, which the failure arm needs to borrow `self` mutably
+                // for (the panel comes back to report it).
+                let launch_result = launch_overlay_selection(
                     &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                     &self.runtime_config,
                     &self.plugin_registry,
@@ -3030,7 +3052,8 @@ impl RuntimeWorker {
                     self.selected_index,
                     self.last_query.as_str(),
                     &self.overlay,
-                ) {
+                );
+                match launch_result {
                     Ok(reset) => {
                         if reset {
                             self.overlay.set_status_text("");
@@ -3047,8 +3070,7 @@ impl RuntimeWorker {
                         }
                     }
                     Err(error) => {
-                        self.overlay
-                            .set_status_text(&format!("Launch error: {error}"));
+                        self.report_action_failure(&format!("Launch error: {error}"));
                     }
                 }
             }
@@ -3088,6 +3110,20 @@ impl RuntimeWorker {
             _ => {} // MoveSelection is handled locally by JS; other variants are forward-compat
         }
     }
+}
+
+/// Bring the panel back so a failure it has to report is on screen, and keep
+/// `OverlayState` in step with the window that is now visible. Free function
+/// so the re-show contract is testable without a whole `RuntimeWorker`.
+#[cfg(target_os = "windows")]
+fn report_failed_action(
+    overlay: &NativeOverlayShell,
+    overlay_state: &mut OverlayState,
+    message: &str,
+) {
+    overlay.show_and_focus();
+    overlay_state.set_visible(true);
+    overlay.set_status_text(message);
 }
 
 #[cfg(target_os = "windows")]
@@ -3475,6 +3511,31 @@ fn looks_like_pin_path(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A launch hides the panel first, so the status line a failure writes has
+    /// to be on a panel that comes back. Otherwise the user sees the panel
+    /// vanish and nothing open (CIQ-256).
+    #[test]
+    fn a_failed_launch_brings_the_panel_back_with_the_message() {
+        let overlay = crate::overlay::shim::NativeOverlayShell::create()
+            .expect("overlay shell should construct in tests");
+        // The shape the launch paths leave behind: hidden, and the runtime's
+        // own visibility flag flipped by `on_escape()`.
+        let mut overlay_state = OverlayState::default();
+        overlay_state.set_visible(true);
+        assert!(overlay_state.on_escape());
+        overlay.hide();
+        assert!(!overlay.is_visible());
+
+        report_failed_action(&overlay, &mut overlay_state, "Launch error: gone");
+
+        assert!(overlay.is_visible(), "the panel must come back to report it");
+        assert_eq!(overlay.status_text(), "Launch error: gone");
+        assert!(
+            overlay_state.is_visible(),
+            "OverlayState must track the window that is now on screen"
+        );
+    }
 
     /// A pin outlives the program it points at, because nothing reconciles
     /// `config.toml` against the filesystem. Rendering it would produce a row

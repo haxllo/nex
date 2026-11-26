@@ -111,6 +111,32 @@ pub(crate) fn shell_app_target_exists(app_id: &str, roots: &[(String, PathBuf)])
     }
 }
 
+/// Whether a `shell:` launch target still names something the system has.
+///
+/// Explorer answers an argument it cannot resolve by opening its default folder,
+/// so a `shell:` target left behind by an uninstall replaced the program with the
+/// Documents folder and reported success. Rows are pruned from the index and pins
+/// are hidden, but a click that lands between an uninstall and the next app pass
+/// still arrives here, so the launch itself has to answer for it.
+///
+/// `shell:AppsFolder\<app id>` is checked with [`shell_app_target_exists`]. Other
+/// shell identities (`shell:RecycleBinFolder`, `shell:MyComputerFolder`, ...) name
+/// a namespace rather than a file and are left to the shell.
+#[cfg(target_os = "windows")]
+pub(crate) fn shell_target_resolves(target: &str) -> bool {
+    const APPS_FOLDER: &str = "shell:AppsFolder\\";
+
+    let trimmed = target.trim();
+    if !trimmed
+        .to_ascii_lowercase()
+        .starts_with(&APPS_FOLDER.to_ascii_lowercase())
+    {
+        return true;
+    }
+    let app_id = trimmed[APPS_FOLDER.len()..].trim();
+    app_id.is_empty() || shell_app_target_exists(app_id, &known_folder_roots())
+}
+
 /// Whether a `quick_launch.pinned` value still points at something launchable.
 ///
 /// Bookmarks are always kept: they have no local target to lose. Everything else
@@ -176,6 +202,12 @@ mod tests {
             "{00000000-0000-0000-0000-000000000000}\\gone.exe",
             &roots
         ));
+
+        // The launch-time question, for the same two shapes.
+        assert!(shell_target_resolves(&format!("shell:AppsFolder\\{here}")));
+        assert!(!shell_target_resolves(&format!("shell:AppsFolder\\{gone}")));
+        assert!(shell_target_resolves("shell:AppsFolder\\Chrome"));
+        assert!(shell_target_resolves("shell:RecycleBinFolder"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

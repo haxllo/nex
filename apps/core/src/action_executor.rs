@@ -9,6 +9,10 @@ pub enum LaunchError {
     EmptyPath,
     MissingPath(PathBuf),
     LaunchFailed { message: String, code: Option<i32> },
+    /// The target resolved to something the system no longer has. Named this way
+    /// instead of as a generic failure because it is a normal outcome of
+    /// uninstalling a program, not a fault to diagnose.
+    Gone { target: String },
     /// Structured launch failure with context for diagnostics
     Structured {
         path: String,
@@ -23,6 +27,7 @@ impl Display for LaunchError {
         match self {
             Self::EmptyPath => write!(f, "empty path"),
             Self::MissingPath(path) => write!(f, "path does not exist: {}", path.display()),
+            Self::Gone { target } => write!(f, "{target} is no longer installed"),
             Self::LaunchFailed { message, code } => {
                 if let Some(code) = code {
                     write!(f, "launch failed: {message} (code {code})")
@@ -150,11 +155,14 @@ fn launch_existing_path(candidate: &Path) -> Result<(), LaunchError> {
 
 #[cfg(target_os = "windows")]
 fn launch_open(target: &str) -> Result<(), LaunchError> {
-    if suppress_launch(target) {
-        return Ok(());
-    }
+    // The shell branch decides for itself whether the target still resolves, so it
+    // is taken before the test-only suppression: otherwise a `shell:` identity
+    // whose program is gone would be reported as a successful launch.
     if target.trim().to_ascii_lowercase().starts_with("shell:") {
         return launch_shell_target(target);
+    }
+    if suppress_launch(target) {
+        return Ok(());
     }
 
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -442,6 +450,16 @@ pub fn resolve_shell_appsfolder_path(_value: &str) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn launch_shell_target(target: &str) -> Result<(), LaunchError> {
+    // Explorer answers an argument it cannot resolve by opening its default
+    // folder, so handing it a `shell:` identity whose program has been
+    // uninstalled silently opened Documents instead. Say what happened. This is
+    // checked before the test-only launch suppression, because it is a decision
+    // about the target rather than a side effect of launching it.
+    if !crate::app_target::shell_target_resolves(target) {
+        return Err(LaunchError::Gone {
+            target: gone_target_name(target),
+        });
+    }
     if suppress_launch(target) {
         return Ok(());
     }
@@ -471,6 +489,28 @@ fn launch_existing_path(_candidate: &Path) -> Result<(), LaunchError> {
 #[cfg(not(target_os = "windows"))]
 fn launch_open(_target: &str) -> Result<(), LaunchError> {
     Ok(())
+}
+
+/// The name to put in front of "is no longer installed".
+///
+/// A `shell:` identity carries either an absolute path or an app id
+/// (`Chrome`, `Spotify.Raycast_...!App`), and neither reads well raw, so a
+/// path-shaped tail gives up its stem and anything else is kept whole.
+#[cfg(target_os = "windows")]
+fn gone_target_name(target: &str) -> String {
+    let tail = target
+        .strip_prefix("shell:AppsFolder\\")
+        .or_else(|| target.strip_prefix("shell:appsfolder\\"))
+        .unwrap_or(target)
+        .trim()
+        .trim_end_matches(['\\', '/']);
+
+    let path = std::path::Path::new(tail);
+    match path.file_stem().map(|stem| stem.to_string_lossy().into_owned()) {
+        Some(stem) if !stem.is_empty() && path.extension().is_some() => stem,
+        _ if !tail.is_empty() => tail.to_string(),
+        _ => target.to_string(),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -508,6 +548,24 @@ fn looks_like_filesystem_path(path: &str) -> bool {
 #[cfg(all(test, target_os = "windows"))]
 mod shell_resolver_probe {
     use super::resolve_shell_appsfolder_path;
+
+    /// An uninstalled program's `shell:` row used to be handed to Explorer, which
+    /// answered by opening its default folder and reporting success. The row is
+    /// pruned now, but a click between the uninstall and the next app pass still
+    /// reached the launch, so this is where it has to be caught.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_shell_target_whose_program_is_gone_is_reported() {
+        use super::launch_open;
+
+        let error = launch_open("shell:AppsFolder\\C:\\NexNoSuchDirectory\\Gone.exe")
+            .expect_err("a missing target must not launch");
+        assert!(
+            matches!(error, super::LaunchError::Gone { .. }),
+            "expected Gone, got {error:?}"
+        );
+        assert_eq!(error.to_string(), "Gone is no longer installed");
+    }
 
     #[test]
     fn resolves_pinned_app_targets() {

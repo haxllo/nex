@@ -1220,7 +1220,37 @@ impl CoreService {
     pub(crate) fn rebuild_application_index_with_report(
         &self,
     ) -> Result<IndexRefreshReport, ServiceError> {
-        self.rebuild_index_internal(false, Some("start-menu-apps"))
+        let report = self.rebuild_index_internal(false, Some("start-menu-apps"))?;
+        // The pass can only drop rows the provider stopped reporting, and the shell
+        // keeps listing an uninstalled app for several seconds. Re-checking what is
+        // already stored does not depend on the shell's timing, so an uninstalled
+        // program stops being searchable on the first pass instead of whenever the
+        // shell finally lets go.
+        match self.prune_apps_with_missing_targets() {
+            Ok(0) => {}
+            Ok(removed) => crate::logging::info(&format!(
+                "[nex] app rows pruned: {removed} whose target no longer exists"
+            )),
+            Err(error) => crate::logging::warn(&format!(
+                "[nex] app row prune failed: {error}"
+            )),
+        }
+        Ok(report)
+    }
+
+    /// Delete stored app rows whose launch target is gone. Returns how many went.
+    fn prune_apps_with_missing_targets(&self) -> Result<usize, ServiceError> {
+        let rows = index_store::app_item_paths(&*self.db())?;
+        let mut removed = 0usize;
+        for (id, path) in rows {
+            if crate::app_target::launch_target_exists(path.as_str()) {
+                continue;
+            }
+            if self.delete_item_by_id_if_present(&id)? {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     /// Forget that a provider was scanned, so the next pass runs instead of being

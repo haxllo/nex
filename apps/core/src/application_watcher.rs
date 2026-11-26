@@ -30,6 +30,46 @@ impl AppChangeDebouncer {
     }
 }
 
+/// Follow-up application passes after an installer-shaped change.
+///
+/// An installer writes over several seconds: it drops a shortcut, then registers
+/// the program, and a pass that runs two seconds later can see neither the shell
+/// entry nor a readable shortcut. One pass therefore reports "nothing changed" and
+/// - because nothing else touches a watched directory afterwards - nothing runs
+/// again until the ten-minute reconcile, which is what made a fresh install take
+/// minutes to appear. These follow-ups re-check shortly after, and stop; a pass is
+/// a few hundred milliseconds, and only an actual change arms them.
+// Measured here: a new shortcut was missed by the pass two seconds after it
+// appeared and found five seconds later, so the offsets are front-loaded.
+const SETTLE_OFFSETS: [Duration; 4] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+];
+
+#[derive(Debug, Default)]
+struct SettleQueue {
+    due: Vec<Instant>,
+}
+
+impl SettleQueue {
+    fn arm(&mut self, now: Instant) {
+        self.due.clear();
+        self.due
+            .extend(SETTLE_OFFSETS.iter().map(|offset| now + *offset));
+    }
+
+    fn take_if_due(&mut self, now: Instant) -> bool {
+        if self.due.iter().any(|due| now >= *due) {
+            self.due.retain(|due| *due > now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod windows {
     use std::{
@@ -55,7 +95,7 @@ mod windows {
         },
     };
 
-    use super::{AppChangeDebouncer, RECONCILE_INTERVAL};
+    use super::{AppChangeDebouncer, RECONCILE_INTERVAL, SettleQueue};
     use crate::{
         core_service::CoreService,
         discovery::application_shortcut_roots,
@@ -270,6 +310,7 @@ mod windows {
         service: Arc<RwLock<CoreService>>,
     ) {
         let mut debouncer = AppChangeDebouncer::new();
+        let mut settle = SettleQueue::default();
         let mut reconcile_at = Instant::now() + RECONCILE_INTERVAL;
         let mut retry_at = None;
 
@@ -290,7 +331,12 @@ mod windows {
 
             let should_reconcile = now >= reconcile_at;
             let should_retry = retry_at.is_some_and(|at| now >= at);
-            if debouncer.take_if_due(now) || should_reconcile || should_retry {
+            let debounced = debouncer.take_if_due(now);
+            if debounced {
+                // The installer is probably still writing; look again shortly.
+                settle.arm(now);
+            }
+            if debounced || settle.take_if_due(now) || should_reconcile || should_retry {
                 retry_at = None;
                 reconcile_at = now + RECONCILE_INTERVAL;
                 // A watcher event is evidence that the app sources changed, so
@@ -304,10 +350,19 @@ mod windows {
                                 "[nex] app discovery refresh could not invalidate the provider stamp: {error}"
                             ));
                         }
+                        // The same registry keys feed the uninstall list. Without
+                        // this, a program installed minutes ago still looks like it
+                        // has no uninstall entry, and "Uninstall" in the context
+                        // menu fell back to opening Settings instead.
+                        crate::uninstall_registry::invalidate_caches();
+
                         match service.rebuild_application_index_with_report() {
                             Ok(report) => crate::logging::info(&format!(
-                                "[nex] app discovery refresh: discovered={} upserted={} removed={}",
-                                report.discovered_total, report.upserted_total, report.removed_total
+                                "[nex] app discovery refresh: discovered={} upserted={} removed={}{}",
+                                report.discovered_total,
+                                report.upserted_total,
+                                report.removed_total,
+                                if debounced { "" } else { " (settle)" }
                             )),
                             Err(error) => {
                                 crate::logging::warn(&format!(
@@ -374,7 +429,42 @@ pub(crate) use windows::ApplicationWatcherHandle;
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{AppChangeDebouncer, INSTALLER_DEBOUNCE};
+    use super::{AppChangeDebouncer, INSTALLER_DEBOUNCE, SETTLE_OFFSETS, SettleQueue};
+
+    /// One pass after an installer's first write is not enough: the installer is
+    /// still writing, the pass reports "nothing changed", and without a follow-up
+    /// nothing runs again until the ten-minute reconcile. Observed on this
+    /// machine: a program installed at 11:07:32 was found by a pass at 11:10:15,
+    /// while the pass two seconds after the shortcut appeared saw nothing.
+    #[test]
+    fn an_install_burst_schedules_follow_up_passes() {
+        let start = Instant::now();
+        let mut settle = SettleQueue::default();
+
+        settle.arm(start);
+        assert!(!settle.take_if_due(start), "no pass before the first offset");
+        assert!(!settle.take_if_due(start + SETTLE_OFFSETS[0] - Duration::from_millis(1)));
+        assert!(
+            settle.take_if_due(start + SETTLE_OFFSETS[0]),
+            "the first follow-up must run"
+        );
+        assert!(
+            !settle.take_if_due(start + SETTLE_OFFSETS[0]),
+            "a follow-up must not repeat"
+        );
+        let last = SETTLE_OFFSETS[SETTLE_OFFSETS.len() - 1];
+        assert!(settle.take_if_due(start + last));
+        assert!(
+            !settle.take_if_due(start + last + Duration::from_secs(60)),
+            "the queue must empty itself, or every later poll would pass"
+        );
+
+        // Re-arming replaces the pending passes instead of stacking new ones.
+        settle.arm(start);
+        settle.arm(start + Duration::from_secs(1));
+        assert!(!settle.take_if_due(start + SETTLE_OFFSETS[0]));
+        assert!(settle.take_if_due(start + Duration::from_secs(1) + SETTLE_OFFSETS[0]));
+    }
 
     #[test]
     fn debounces_installer_bursts_until_the_latest_change_is_quiet() {

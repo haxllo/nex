@@ -355,6 +355,27 @@ pub(crate) fn tick_handled(sent_us: u64) {
     }
 }
 
+/// Time one suspect call on the UI thread and name it if it overran.
+///
+/// The stall this exists for logs nothing inside itself: the thread that would
+/// have logged is the blocked one. Wrapping the few calls that can plausibly hold
+/// the UI thread for hundreds of milliseconds makes the next occurrence say
+/// *which* call it was, without a profiler and without a second reproduction.
+pub(crate) fn phase<T>(name: &'static str, body: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    let outcome = body();
+    let elapsed_us = started.elapsed().as_micros() as u64;
+    // The same 150 ms threshold as the watchdog: below it, a call is part of a
+    // healthy loop and there is nothing to attribute.
+    if elapsed_us >= 150_000 {
+        crate::runtime::log_info(&format!(
+            "[nex][probe] phase='{name}' took {}ms",
+            elapsed_us / 1_000
+        ));
+    }
+    outcome
+}
+
 /// Worst watchdog latency since the last hide, in milliseconds.
 pub(crate) fn worst_tick_ms() -> u64 {
     WORST_TICK_US

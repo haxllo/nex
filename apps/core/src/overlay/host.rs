@@ -3006,9 +3006,11 @@ fn post_json(webview: &WebView, json: impl std::fmt::Display) {
     let json = json.to_string();
     let wv2 = webview.webview();
     let wide: Vec<u16> = json.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
+    // One of the three candidates for the 0.7 s stall after the first keystroke:
+    // this is a COM call into a renderer that is busy painting the expansion.
+    crate::overlay::probe::phase("webview post", || unsafe {
         let _ = wv2.PostWebMessageAsJson(windows_core::PCWSTR::from_raw(wide.as_ptr()));
-    }
+    });
 }
 
 /// Push the current state snapshot to the page.
@@ -3331,7 +3333,11 @@ fn push_state(
     // Phase 3: Encode icons outside lock (~2-5ms for 20 rows).
     // Note: png_bytes() may block on first decode per icon (cold cache),
     // but the state lock is not held during this work.
-    let icons_json = snapshot_icons_json(&snapshot, icons, show_pending);
+    //
+    // Third candidate for the stall: this runs on the UI thread and is the only
+    // part of a keystroke that can grow with what is on screen.
+    let icons_json =
+        crate::overlay::probe::phase("state icons", || snapshot_icons_json(&snapshot, icons, show_pending));
 
     // Phase 4: Send both messages back-to-back (same frame).
     post_json(&wv, &state_json);
@@ -4032,24 +4038,28 @@ fn apply_window_height(
     state: &Arc<Mutex<ShimState>>,
 ) {
     crate::logging::info(&format!("[nex][resize] apply h={h:.0}"));
-    window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
-    if let Some(wv) = webview {
-        keep_webview_viewport_max(wv);
-    }
-    // Apply the native frame or fallback regions after Wry has restored its
-    // maximum viewport; this leaves both native surfaces in final geometry.
-    sync_window_frame(window, state, false);
-    if let Some(layer) = glass {
-        let scale = window.scale_factor();
-        layer.sync_to_main(
-            window.hwnd() as isize,
-            scale,
-            WINDOW_WIDTH,
-            h,
-            crate::overlay::refraction::physical_px(WINDOW_WIDTH, scale),
-            crate::overlay::refraction::physical_px(MAX_HEIGHT, scale),
-        );
-    }
+    // Second candidate for the stall: resizing the window while the renderer is
+    // busy with the same expansion, then re-aligning two native surfaces to it.
+    crate::overlay::probe::phase("resize apply", || {
+        window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
+        if let Some(wv) = webview {
+            keep_webview_viewport_max(wv);
+        }
+        // Apply the native frame or fallback regions after Wry has restored its
+        // maximum viewport; this leaves both native surfaces in final geometry.
+        sync_window_frame(window, state, false);
+        if let Some(layer) = glass {
+            let scale = window.scale_factor();
+            layer.sync_to_main(
+                window.hwnd() as isize,
+                scale,
+                WINDOW_WIDTH,
+                h,
+                crate::overlay::refraction::physical_px(WINDOW_WIDTH, scale),
+                crate::overlay::refraction::physical_px(MAX_HEIGHT, scale),
+            );
+        }
+    });
 }
 
 /// Center the window horizontally on the monitor under the cursor and

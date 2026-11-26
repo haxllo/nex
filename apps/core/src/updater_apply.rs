@@ -1,7 +1,7 @@
 //! The apply half of the native updater: fetch, verify, swap, or put back.
 //!
-//! Called only when an engine switch asks for it — the script is still the
-//! default. Nothing here decides *which* install to touch (that is
+//! This is the only update path: the PowerShell script it replaced is gone.
+//! Nothing here decides *which* install to touch (that is
 //! `update_install`) or *what* safe means for a manifest (that is
 //! `updater_engine`); this module performs the steps in an order that keeps the
 //! user's install recoverable at every point.
@@ -13,6 +13,11 @@
 //! * The install tree is renamed aside before the installer runs, and only
 //!   deleted after the new build has answered `--ensure-config` and
 //!   `--sync-startup`. A failure at any later step moves the old tree back.
+//! * A failure always leaves the user with a running Nex: the previous install is
+//!   restored when there is anything to restore, and the installed build is
+//!   restarted when there is not. Stopping the runtime and then returning without
+//!   starting it again is the one outcome this module must never produce, because
+//!   the user is left with no app and no explanation.
 //! * Every step is appended to one log file, and a failure names its stage, so
 //!   "the update did nothing" can be answered from the log instead of guessed.
 
@@ -197,7 +202,7 @@ pub fn run_update(
         }
 
         log.step("[5/5] confirming the new build");
-        let new_exe = crate::update_install::runtime_executable(&target.root);
+        let new_exe = crate::update_install::ui_executable(&target.root);
         if !new_exe.is_file() {
             return Err(UpdateError::new(
                 Stage::Confirm,
@@ -237,22 +242,89 @@ pub fn run_update(
             })
         }
         Err(error) => {
-            log.step(&format!("update failed at {}: {}", error.stage.as_str(), error.message));
-            if backed_up {
-                log.step("rolling back");
-                match rollback(&target.root, &backup_dir) {
-                    Ok(()) => log.step("rollback complete: previous install restored"),
-                    Err(message) => log.step(&format!(
-                        "ROLLBACK FAILED: {message} (backup kept at {})",
-                        backup_dir.display()
-                    )),
+            log.step(&format!(
+                "update failed at {}: {}",
+                error.stage.as_str(),
+                error.message
+            ));
+            let runtime_present = crate::update_install::ui_executable(&target.root).is_file();
+            let plan = recovery_plan(backed_up, backup_dir.exists(), runtime_present);
+            log.step(&format!("recovery: {plan:?}"));
+            let mut restarted = false;
+            match plan {
+                RecoveryPlan::RestoreFromBackup => {
+                    log.step("rolling back");
+                    match rollback(&target.root, &backup_dir) {
+                        // `rollback` starts the restored build itself.
+                        Ok(()) => {
+                            restarted = true;
+                            log.step("rollback complete: previous install restored");
+                        }
+                        Err(message) => log.step(&format!(
+                            "ROLLBACK FAILED: {message} (backup kept at {})",
+                            backup_dir.display()
+                        )),
+                    }
                 }
-            } else {
-                log.step("nothing had moved; the previous install was never touched");
+                RecoveryPlan::RestartInstalled => {
+                    log.step("the install was not replaced; restarting what is there");
+                }
+                RecoveryPlan::NothingToStart => {
+                    log.step("no runnable install on disk");
+                }
+            }
+
+            // The runtime was stopped on the way in. Whatever happened since, the
+            // user is owed a running app - that is the whole difference between an
+            // update that failed and an update that uninstalled Nex.
+            if !restarted {
+                let exe = crate::update_install::ui_executable(&target.root);
+                if exe.is_file() {
+                    match start_detached(&exe) {
+                        Ok(()) => {
+                            restarted = true;
+                            log.step(&format!("restarted {}", exe.display()));
+                        }
+                        Err(message) => log.step(&format!("could not restart Nex: {message}")),
+                    }
+                }
+            }
+            if !restarted {
+                log.step(&format!(
+                    "Nex is not running; the previous install is at {}",
+                    backup_dir.display()
+                ));
             }
             Err(error)
         }
     }
+}
+
+/// What to do after a failed update, from what is actually on disk.
+///
+/// The three states are not guesses: `backed_up` means the old tree was moved
+/// aside, a backup directory with no flag means a cross-volume copy landed but the
+/// original was only partly removed, and neither means the install was never
+/// touched. Each needs a different recovery, and the one that must never happen is
+/// "Nex was stopped and nothing was started again".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryPlan {
+    /// The previous install is in the backup directory: put it back and start it.
+    RestoreFromBackup,
+    /// The install is intact: start the build that is already there.
+    RestartInstalled,
+    /// Nothing runnable is left; the log has to say so plainly.
+    NothingToStart,
+}
+
+fn recovery_plan(backed_up: bool, backup_exists: bool, runtime_present: bool) -> RecoveryPlan {
+    if backed_up || (backup_exists && !runtime_present) {
+        return RecoveryPlan::RestoreFromBackup;
+    }
+    if runtime_present {
+        return RecoveryPlan::RestartInstalled;
+    }
+    RecoveryPlan::NothingToStart
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -518,13 +590,24 @@ fn remove_tree(path: &Path) -> Result<(), String> {
 
 fn rollback(install_root: &Path, backup: &Path) -> Result<(), String> {
     let _ = stop_runtime();
-    remove_tree(install_root)?;
-    move_tree(backup, install_root)?;
-    let restored = crate::update_install::runtime_executable(install_root);
+    restore_tree(install_root, backup)?;
+    let restored = crate::update_install::ui_executable(install_root);
     if restored.is_file() {
         let _ = start_detached(&restored);
     }
     Ok(())
+}
+
+/// Put the backed-up tree back where the install lives.
+///
+/// Split out from [`rollback`] so the file half can be tested on real directories
+/// without stopping or starting the runtime this machine is using.
+fn restore_tree(install_root: &Path, backup: &Path) -> Result<(), String> {
+    if !backup.exists() {
+        return Err(format!("'{}' is gone", backup.display()));
+    }
+    remove_tree(install_root)?;
+    move_tree(backup, install_root)
 }
 
 // ---------------------------------------------------------------------------
@@ -795,14 +878,22 @@ fn run_elevated(program: &Path, arguments: &str) -> Result<u32, String> {
 #[cfg(target_os = "windows")]
 fn wait_for_process(handle: windows_sys::Win32::Foundation::HANDLE, timeout: Duration) -> Result<u32, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, TerminateProcess, WaitForSingleObject,
+    };
 
     let millis = timeout.as_millis().min(u32::MAX as u128) as u32;
     // SAFETY: `handle` is a live process handle owned by the caller.
     let waited = unsafe { WaitForSingleObject(handle, millis) };
     if waited == WAIT_TIMEOUT {
+        // Rollback deletes and moves the install tree, so the installer must not
+        // still be writing into it. A hung installer is abandoned, not waited for.
+        // SAFETY: as above; terminating our own child needs no further rights.
+        let _ = unsafe { TerminateProcess(handle, 1) };
+        // SAFETY: give it a moment to actually die before the caller touches the tree.
+        let _ = unsafe { WaitForSingleObject(handle, 5_000) };
         return Err(format!(
-            "the installer did not finish within {} minutes",
+            "the installer did not finish within {} minutes and was terminated",
             timeout.as_secs() / 60
         ));
     }
@@ -973,7 +1064,67 @@ fn quote_argument(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{others_alive, quote_argument, UpdateOptions};
+    use super::{others_alive, quote_argument, recovery_plan, RecoveryPlan, UpdateOptions};
+
+    /// Putting the backup back is the whole point of taking one. This runs the real
+    /// file moves against temp directories, because the branch that calls it needs
+    /// an installer that fails halfway and cannot be staged safely on a live install.
+    #[test]
+    fn a_rollback_puts_the_backup_where_the_install_was() {
+        let base = std::env::temp_dir().join("nex-restore-tree-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("install");
+        let backup = base.join("backup");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::create_dir_all(backup.join("bin")).unwrap();
+        std::fs::write(root.join("bin").join("new-build.txt"), b"new").unwrap();
+        std::fs::write(backup.join("bin").join("old-build.txt"), b"old").unwrap();
+
+        super::restore_tree(&root, &backup).unwrap();
+
+        assert!(root.join("bin").join("old-build.txt").is_file(), "the backup must be in place");
+        assert!(
+            !root.join("bin").join("new-build.txt").exists(),
+            "the failed install must not be left mixed in"
+        );
+        assert!(!backup.exists(), "the backup must have been moved, not copied");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A failed update used to leave Nex stopped: `stop_runtime` succeeded, the
+    /// move aside failed, and the error arm returned without starting anything
+    /// again. Each combination of what survived on disk now has to end with a
+    /// running app or a plain statement that there is none.
+    #[test]
+    fn a_failed_update_always_leaves_a_running_install() {
+        // Moved aside: put the old tree back.
+        assert_eq!(
+            recovery_plan(true, true, false),
+            RecoveryPlan::RestoreFromBackup
+        );
+        // Cross-volume copy landed but the original was only partly removed: the
+        // backup is the only complete tree, so restore from it.
+        assert_eq!(
+            recovery_plan(false, true, false),
+            RecoveryPlan::RestoreFromBackup
+        );
+        // A plain rename failure leaves the install untouched: just start it.
+        assert_eq!(
+            recovery_plan(false, false, true),
+            RecoveryPlan::RestartInstalled
+        );
+        // A copy exists but the install is still intact and runnable: prefer the
+        // build the user already had over a half-written swap.
+        assert_eq!(
+            recovery_plan(false, true, true),
+            RecoveryPlan::RestartInstalled
+        );
+        // Nothing runnable anywhere: say so instead of failing silently.
+        assert_eq!(
+            recovery_plan(false, false, false),
+            RecoveryPlan::NothingToStart
+        );
+    }
 
     #[test]
     fn stopping_never_counts_the_updater_itself() {

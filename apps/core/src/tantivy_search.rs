@@ -10,7 +10,7 @@ use std::time::Instant;
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
 use tantivy::merge_policy::LogMergePolicy;
-use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur};
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, TermQuery};
 use tantivy::schema::*;
 use tantivy::{doc, query::Query, Index, IndexReader, IndexWriter, TantivyDocument};
 
@@ -26,6 +26,16 @@ pub(crate) struct TantivyFields {
     pub extension: Field,
     pub use_count: Field,
     pub last_accessed_epoch_secs: Field,
+}
+
+/// How many app hits a one- or two-letter query keeps in front of its seed.
+const SHORT_QUERY_APP_FLOOR: usize = 24;
+
+/// A short query is the one that can lose its app section to file paths, and it
+/// is also the one where the apps are most likely to be what the user wants.
+fn short_query_gets_app_floor(query_text: &str) -> bool {
+    let trimmed = query_text.trim();
+    !trimmed.is_empty() && trimmed.chars().count() <= 2 && !trimmed.contains(char::is_whitespace)
 }
 
 /// Why `TantivyIndex::open` failed. `LockBusy` means another process (a
@@ -127,6 +137,125 @@ impl TantivyIndex {
         })
     }
 
+    /// One search hit as a `SearchItem`, so the plain seed and the app floor
+    /// read documents the same way.
+    fn item_from_hit(
+        &self,
+        searcher: &tantivy::Searcher,
+        score: f32,
+        doc_address: tantivy::DocAddress,
+    ) -> Result<SearchItem, String> {
+        let doc: TantivyDocument = searcher
+            .doc::<TantivyDocument>(doc_address)
+            .map_err(|e| format!("tantivy doc retrieval error: {e}"))?;
+
+        let id = doc
+            .get_first(self.fields.id)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let title = doc
+            .get_first(self.fields.title)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let path_value = doc
+            .get_first(self.fields.path)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let subtitle = doc
+            .get_first(self.fields.subtitle)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let kind = doc
+            .get_first(self.fields.kind)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let use_count = doc
+            .get_first(self.fields.use_count)
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as u32;
+        let last_accessed = doc
+            .get_first(self.fields.last_accessed_epoch_secs)
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        // Map BM25 (~0..5) to 0..5000 range for pre_score
+        let pre_score = ((score / 5.0) * 5000.0).round() as i64;
+
+        Ok(SearchItem::from_owned_with_subtitle(
+            id,
+            kind,
+            title,
+            path_value,
+            subtitle,
+            use_count,
+            last_accessed,
+        )
+        .with_pre_score(pre_score))
+    }
+
+    /// Re-run the same prefix query with the `kind` fixed to apps and put those
+    /// hits in front of the seed, so a short query cannot lose the app section
+    /// to file paths that happen to contain the same letters.
+    fn merge_app_floor(
+        &self,
+        searcher: &tantivy::Searcher,
+        query_text: &str,
+        results: Vec<SearchItem>,
+        limit: usize,
+    ) -> Result<Vec<SearchItem>, String> {
+        let present: HashSet<String> = results
+            .iter()
+            .filter(|item| item.kind == "app")
+            .map(|item| item.id.clone())
+            .collect();
+        if present.len() >= SHORT_QUERY_APP_FLOOR {
+            return Ok(results);
+        }
+
+        let prefix = build_prefix_query(
+            &searcher.index(),
+            query_text,
+            &[
+                self.fields.title_norm,
+                self.fields.path,
+                self.fields.subtitle,
+            ],
+            self.fields.title_norm,
+        )?;
+        let app_term = tantivy::Term::from_field_text(self.fields.kind, "app");
+        let query: Box<dyn Query> = Box::new(BooleanQuery::new(vec![
+            (Occur::Must, prefix),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(app_term, IndexRecordOption::Basic)),
+            ),
+        ]));
+        let app_docs = searcher
+            .search(&query, &TopDocs::with_limit(SHORT_QUERY_APP_FLOOR).order_by_score())
+            .map_err(|e| format!("tantivy app floor error: {e}"))?;
+
+        let mut merged: Vec<SearchItem> = Vec::with_capacity(app_docs.len() + results.len());
+        let mut seen = HashSet::new();
+        for (score, doc_address) in app_docs {
+            let item = self.item_from_hit(searcher, score, doc_address)?;
+            if seen.insert(item.id.clone()) {
+                merged.push(item);
+            }
+        }
+        for item in results {
+            if seen.insert(item.id.clone()) {
+                merged.push(item);
+            }
+        }
+        merged.truncate(limit);
+        Ok(merged)
+    }
+
     pub fn search(&self, query_text: &str, limit: usize) -> Result<Vec<SearchItem>, String> {
         if query_text.trim().is_empty() {
             return Ok(Vec::new());
@@ -173,60 +302,20 @@ impl TantivyIndex {
 
         let mut results = Vec::with_capacity(top_docs.len());
         for (score, doc_address) in top_docs {
-            let doc: TantivyDocument = searcher
-                .doc::<TantivyDocument>(doc_address)
-                .map_err(|e| format!("tantivy doc retrieval error: {e}"))?;
-
-            let id = doc
-                .get_first(self.fields.id)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let title = doc
-                .get_first(self.fields.title)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let path_value = doc
-                .get_first(self.fields.path)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let subtitle = doc
-                .get_first(self.fields.subtitle)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let kind = doc
-                .get_first(self.fields.kind)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let use_count = doc
-                .get_first(self.fields.use_count)
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0) as u32;
-            let last_accessed = doc
-                .get_first(self.fields.last_accessed_epoch_secs)
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-
-            // Map BM25 (~0..5) to 0..5000 range for pre_score
-            let pre_score = ((score / 5.0) * 5000.0).round() as i64;
-
-            results.push(
-                SearchItem::from_owned_with_subtitle(
-                    id,
-                    kind,
-                    title,
-                    path_value,
-                    subtitle,
-                    use_count,
-                    last_accessed,
-                )
-                .with_pre_score(pre_score),
-            );
+            results.push(self.item_from_hit(&searcher, score, doc_address)?);
         }
+
+        // A one- or two-letter query asks one Tantivy query for the whole index,
+        // and BM25 hands the seed to whatever has the letter in its path: the
+        // index holds far more such files than app names that start with it, so
+        // the app section could show a single row for "v" while files and
+        // folders listed normally. Raising the limit would admit more files and
+        // pay the keystroke cost that was just taken out, so reserve a floor of
+        // app hits instead and put them in front of the seed.
+        if short_query_gets_app_floor(query_text) {
+            results = self.merge_app_floor(&searcher, query_text, results, limit)?;
+        }
+        let results = results;
 
         // One line only when a query is slow enough to be felt. Without it the
         // cause of a slow first keystroke can only be guessed at: the four
@@ -1055,6 +1144,54 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let index = TantivyIndex::open(dir.path()).expect("open tantivy index");
         (index, dir)
+    }
+
+    /// The app section must not vanish behind file paths for a short query.
+    ///
+    /// One letter is the case the owner reported: "v" showed a single app while
+    /// files and folders listed normally, because one BM25 query over the whole
+    /// index handed every slot to paths containing the letter.
+    #[test]
+    fn a_short_query_keeps_its_apps_in_front_of_the_file_paths() {
+        let _serial = tantivy_guard();
+        let (index, _dir) = open_temp_index();
+        let mut items = Vec::new();
+        for n in 0..60 {
+            items.push(SearchItem::new(
+                &format!("f{n}"),
+                "file",
+                &format!("v-note-{n}.txt"),
+                &format!("/home/user/projects/v-note-{n}.txt"),
+            ));
+        }
+        for (n, app) in ["VLC media player", "Visual Studio Code", "Viber"]
+            .iter()
+            .enumerate()
+        {
+            items.push(SearchItem::new(
+                &format!("a{n}"),
+                "app",
+                app,
+                &format!(r"shell:AppsFolderapp{}", n),
+            ));
+        }
+        index.index_items(&items).unwrap();
+
+        let hits = index.search("v", 40).unwrap();
+        let apps = hits.iter().filter(|item| item.kind == "app").count();
+        assert_eq!(
+            apps, 3,
+            "all three apps must survive a one-letter query, got {apps} of {} hits",
+            hits.len()
+        );
+        let first_file = hits
+            .iter()
+            .position(|item| item.kind == "file")
+            .expect("the file paths are still returned");
+        assert!(
+            first_file >= apps,
+            "apps must stay in front of the seed the UI truncates: {hits:?}"
+        );
     }
 
     #[test]

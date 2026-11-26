@@ -36,6 +36,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # The docs gate diffs the pushed commit against the event's before-SHA
+          # on a push, which a depth-1 clone does not contain.
+          fetch-depth: 2
 
       - name: Require Linear issue for code changes
         if: github.event_name == 'pull_request'
@@ -80,10 +84,24 @@ jobs:
             # A push carries no pull-request body, so the bypass reason is read from
             # the head commit message instead. A change pushed straight to master
             # therefore has to carry the marker in its own message.
+            # The before-SHA of a push is not in a shallow clone, so fetch it and
+            # fall back rather than dying on `bad object` and failing the job for
+            # a reason that has nothing to do with documentation.
             if printf '%s' "$BEFORE_SHA" | grep -Eq '^0+$'; then
-              git diff --name-only HEAD~1 HEAD > "$RUNNER_TEMP/changed.txt"
+              base=""
             else
-              git diff --name-only "$BEFORE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"
+              git fetch -q --no-tags origin "$BEFORE_SHA" 2>/dev/null || true
+              if git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+                base="$BEFORE_SHA"
+              else
+                base="$(git rev-parse --verify -q HEAD~1 || true)"
+              fi
+            fi
+            if [ -n "$base" ]; then
+              git diff --name-only "$base" HEAD > "$RUNNER_TEMP/changed.txt"
+            else
+              echo "no base commit available; using the pushed commit's own diff"
+              git show --pretty=format: --name-only HEAD > "$RUNNER_TEMP/changed.txt"
             fi
             REASON_SOURCE="$(git log -1 --pretty=%B)"
           fi

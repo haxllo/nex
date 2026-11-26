@@ -253,7 +253,10 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         }
     }
 
-    let runtime_config = config::load(None)?;
+    // A config this build cannot read must not end the session: the panel is the
+    // only way to fix settings, and a process that exits before showing it leaves
+    // the user with nothing but a log line.
+    let runtime_config = config::load_for_startup(None);
     // Seed the WebView background before any WebView environment exists:
     // Chromium picks subpixel (ClearType) vs grayscale text at surface
     // creation and ignores later runtime switches (verified with a

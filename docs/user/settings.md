@@ -19,6 +19,21 @@ Settings view. Windows paths need doubled backslashes: `C:\\Users\\you\\Docs`.
 The `version` key is the internal schema version. Do not edit it; migrations read
 it and a wrong value makes Nex re-run migrations that already happened.
 
+## When a value is wrong
+
+A value Nex does not recognise is not a reason for it to refuse to start. An
+unknown choice for one of the listed options (`panel_background`, `view_mode`,
+`search_mode_default`, `web_search_provider`) falls back to that option's default,
+the rest of the file is read as written, and the substitution is logged in
+`%APPDATA%\Nex\logs\nex.log`. This is what happens when a config written by a
+newer Nex is opened by an older one.
+
+A file that cannot be read at all - broken TOML, a value of the wrong type, a
+setting outside its allowed range - is moved aside to `config.toml.invalid` beside
+the original, and Nex starts with default settings. Repair the quarantined file and
+copy it back over `config.toml` to recover your settings; the defaults are written
+to a fresh `config.toml` in the meantime.
+
 ## Starter
 
 These are the keys people change first.

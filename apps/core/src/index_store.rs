@@ -569,6 +569,13 @@ pub fn get_meta(db: &Connection, key: &str) -> Result<Option<String>, StoreError
     }
 }
 
+/// Remove one metadata entry. Used to forget that a provider was scanned, so the
+/// next pass runs rather than being skipped as fresh.
+pub fn delete_meta(db: &Connection, key: &str) -> Result<(), StoreError> {
+    db.execute("DELETE FROM index_meta WHERE key = ?1", params![key])?;
+    Ok(())
+}
+
 pub fn set_meta(db: &Connection, key: &str, value: &str) -> Result<(), StoreError> {
     db.execute(
         "INSERT INTO index_meta (key, value) VALUES (?1, ?2)

@@ -293,19 +293,30 @@ mod windows {
             if debouncer.take_if_due(now) || should_reconcile || should_retry {
                 retry_at = None;
                 reconcile_at = now + RECONCILE_INTERVAL;
-                match service.try_read() {
-                    Ok(service) => match service.rebuild_application_index_with_report() {
-                        Ok(report) => crate::logging::info(&format!(
-                            "[nex] app discovery refresh: discovered={} upserted={} removed={}",
-                            report.discovered_total, report.upserted_total, report.removed_total
-                        )),
-                        Err(error) => {
+                // A watcher event is evidence that the app sources changed, so
+                // the provider must not be skipped as "scanned recently": the
+                // stamp only describes the roots, and a program that was just
+                // installed changes nothing it can see.
+                match service.try_write() {
+                    Ok(mut service) => {
+                        if let Err(error) = service.invalidate_provider_stamp("start-menu-apps") {
                             crate::logging::warn(&format!(
-                                "[nex] app discovery refresh failed; retrying: {error}"
+                                "[nex] app discovery refresh could not invalidate the provider stamp: {error}"
                             ));
-                            retry_at = Some(now + RETRY_DELAY);
                         }
-                    },
+                        match service.rebuild_application_index_with_report() {
+                            Ok(report) => crate::logging::info(&format!(
+                                "[nex] app discovery refresh: discovered={} upserted={} removed={}",
+                                report.discovered_total, report.upserted_total, report.removed_total
+                            )),
+                            Err(error) => {
+                                crate::logging::warn(&format!(
+                                    "[nex] app discovery refresh failed; retrying: {error}"
+                                ));
+                                retry_at = Some(now + RETRY_DELAY);
+                            }
+                        }
+                    }
                     Err(_) => retry_at = Some(now + RETRY_DELAY),
                 }
             }

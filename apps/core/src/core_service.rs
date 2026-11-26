@@ -75,7 +75,10 @@ impl CacheReady {
 }
 
 const STALE_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
-const PROVIDER_RECONCILE_INTERVAL_SECS: i64 = 30 * 60;
+// The app watcher reconciles every 10 minutes; the freshness gate has to agree
+// with it, or two of every three of those passes are skipped. A full app pass is
+// a few hundred milliseconds, so matching the watcher is cheap.
+const PROVIDER_RECONCILE_INTERVAL_SECS: i64 = 10 * 60;
 /// 128 `Path::exists` probes per 15 s tick (~8/s amortized). 16 took
 /// ~31 h to sweep a 120k-item index; 128 sweeps in ~4 h with the same
 /// `try_write` politeness (skips under load).
@@ -1218,6 +1221,19 @@ impl CoreService {
         &self,
     ) -> Result<IndexRefreshReport, ServiceError> {
         self.rebuild_index_internal(false, Some("start-menu-apps"))
+    }
+
+    /// Forget that a provider was scanned, so the next pass runs instead of being
+    /// skipped as fresh.
+    ///
+    /// The freshness gate compares the provider stamp and the last scan time, and
+    /// for the app providers it is the watcher - not the stamp - that knows a
+    /// program was installed. Without this an install is only picked up when the
+    /// reconcile interval happens to elapse.
+    pub(crate) fn invalidate_provider_stamp(&self, provider_name: &str) -> Result<(), ServiceError> {
+        index_store::delete_meta(&*self.db(), &provider_stamp_meta_key(provider_name))?;
+        index_store::delete_meta(&*self.db(), &provider_last_scan_meta_key(provider_name))?;
+        Ok(())
     }
 
     fn rebuild_index_internal(

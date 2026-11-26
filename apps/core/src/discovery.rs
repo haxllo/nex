@@ -298,10 +298,12 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
         // rebuilds do not keep stale cached app entries.
         // 13: entries whose AppsFolder target no longer exists are filtered out,
         // so a cached app list from an older build would keep the stale rows.
-        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "13";
+        // 14: the stamp carries each root's modification time, so installing a
+        // program is visible without waiting for the reconcile interval.
+        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "14";
         Some(format!(
             "v{START_MENU_DISCOVERY_SCHEMA_VERSION};{}",
-            roots_change_stamp(&self.roots)
+            app_roots_change_stamp(&self.roots)
         ))
     }
 }
@@ -1643,6 +1645,31 @@ fn roots_change_stamp(roots: &[PathBuf]) -> String {
     parts.join("|")
 }
 
+/// Change stamp for the Start-menu roots.
+///
+/// [`roots_change_stamp`] records identity and existence only, because on the
+/// filesystem backend live metadata changed constantly and forced a full walk on
+/// every startup. The app roots are a handful of Start-menu folders that change
+/// only when something is installed or removed, so their modification time is
+/// both cheap and meaningful: without it a newly installed program changed
+/// nothing the stamp could see, and the app pass was skipped until the reconcile
+/// interval elapsed - which is what made an install look like it needed a
+/// restart.
+fn app_roots_change_stamp(roots: &[PathBuf]) -> String {
+    let mut parts = Vec::with_capacity(roots.len());
+    for root in roots {
+        let normalized = normalize_root_for_stamp(root);
+        let modified = std::fs::metadata(root)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        parts.push(format!("{normalized}:{modified}"));
+    }
+    parts.join("|")
+}
+
 fn normalize_root_for_stamp(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
@@ -2353,6 +2380,9 @@ fn discover_start_apps(
         }
         if !crate::app_target::shell_app_target_exists(app_id, &folder_roots) {
             dropped_missing_targets += 1;
+            crate::logging::info(&format!(
+                "[nex] start-menu apps: dropped '{title}' ({app_id}) - target no longer exists"
+            ));
             continue;
         }
         if should_exclude_non_app_start_reference(title, app_id) {
@@ -2915,6 +2945,26 @@ fn is_excluded_windows_kits_shortcut_reference(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Installing a program has to be visible without waiting for the reconcile
+    /// interval. The old Start-menu stamp recorded only identity and existence, so
+    /// a new shortcut changed nothing it could see and the app pass was skipped -
+    /// which is what made an install look like it needed a restart.
+    #[test]
+    fn the_app_stamp_notices_a_new_shortcut() {
+        let dir = std::env::temp_dir().join("nex-app-stamp-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let before = app_roots_change_stamp(std::slice::from_ref(&dir));
+        // Directory mtimes have one-second resolution on some filesystems.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(dir.join("Installed App.lnk"), b"x").unwrap();
+        let after = app_roots_change_stamp(std::slice::from_ref(&dir));
+
+        assert_ne!(before, after, "a new shortcut must change the stamp");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The `App Paths` provider used to run a PowerShell script whose registry
     /// paths had lost their backslashes, so every `Get-ChildItem` resolved

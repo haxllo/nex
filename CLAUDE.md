@@ -8,7 +8,10 @@ only repeats the rules that must never be skipped.
    actually happened. Questions and planning do not need an issue.
 2. **Verify, then report.** Use `CARGO_TARGET_DIR=G:\nex-target` and a release
    build; never claim a check passed unless it was run.
-3. **Commit identity.** Author is the repo owner; commit bodies contain no
+3. **Commit identity.** Author is the human responsible for the change — the repo
+   owner here, an outside contributor on their own PR — under their own real
+   address; never a bot, an AI, or a placeholder like `<your-email@example.com>`,
+   which GitHub credits to whoever registered it. Commit bodies contain no
    AI/bot names or co-author trailers. Do not commit unless asked.
 4. **Process boundaries.** `NexUIProcess.exe` (Medium IL) never indexes,
    `NexIndexerProcess.exe` (Medium IL) never renders, and `NexHelper.exe`

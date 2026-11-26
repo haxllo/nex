@@ -1,6 +1,7 @@
 #!/bin/sh
 # Nex commit policy.
 #
+# 0. Refuse placeholder, test and bot author identities.
 # 1. Strip AI co-author trailers.
 # 2. Require a Linear issue id (CIQ-<n>) when the commit changes code paths.
 # 3. Refuse an issue-tracked commit on master/main: issue work needs a branch.
@@ -8,8 +9,73 @@
 # Exceptional commits can bypass once with:
 #   NEX_ALLOW_NO_LINEAR=1      git commit ...   (no Linear id)
 #   NEX_ALLOW_MASTER_COMMIT=1  git commit ...   (issue commit on master)
+#
+# An outside contributor is not blocked: their own real address is accepted and
+# reported. NEX_OWNER_EMAIL overrides whose address counts as the owner's.
 
 msg_file="$1"
+
+# --- 0. Commit identity -----------------------------------------------------
+# GitHub credits a commit to whoever owns the author EMAIL, so a placeholder
+# address attributes the work to a stranger. This repo picked up an unrelated
+# "contributor" that way: one commit authored as <your-email@example.com>, git's
+# unconfigured default, is counted as a contribution by whoever registered that
+# address. Reserved/test addresses and addresses with no real domain are
+# refused. Any other address is allowed - an outside contributor is not the
+# owner and must not be blocked - but a foreign author is reported loudly,
+# because a name nobody recognises is worth a second look before it ships.
+owner_email="${NEX_OWNER_EMAIL:-mshabeeburrahman786@gmail.com}"
+author_ident=$(git var GIT_AUTHOR_IDENT 2>/dev/null || true)
+author_email=$(printf '%s' "$author_ident" | sed -n 's/.*<\(.*\)>.*/\1/p')
+author_name=$(printf '%s' "$author_ident" | sed -n 's/^\([^<]*\) <.*/\1/p' | sed 's/[[:space:]]*$//')
+
+if [ -z "$author_email" ]; then
+  echo "commit-msg: the commit has no author email; set one with 'git config user.email'." >&2
+  exit 1
+fi
+
+reject_identity() {
+  cat >&2 <<EOF
+commit-msg: refusing author identity <$author_email> ($1).
+
+            GitHub credits a commit to the account that owns its author email.
+            A placeholder address silently credits whoever registered it, which
+            is how an unrelated person appeared in this repo's contributors.
+
+            Use your own address:
+              git config user.email "<you>@<your-domain>"
+              git commit --author="Your Name <you@your-domain>" ...
+EOF
+  exit 1
+}
+
+case "$author_email" in
+  *@example.com|*@example.org|*@example.net|*@example|*@invalid|*@localhost) 
+    reject_identity "reserved documentation address" ;;
+  *@test|*@test.com|*@test.local)
+    reject_identity "reserved test address" ;;
+  *'[bot]'@users.noreply.github.com|*@bots.noreply.github.com)
+    reject_identity "bot identity; commits are attributed to a person" ;;
+  *@commandcode.ai)
+    reject_identity "automation identity; commits are attributed to a person" ;;
+esac
+
+# 'dev@nex' is what an unconfigured git hostname produces: no routable domain.
+case "${author_email#*@}" in
+  *.*) ;;
+  *) reject_identity "address has no domain" ;;
+esac
+
+if [ "$author_email" != "$owner_email" ]; then
+  cat >&2 <<EOF
+commit-msg: note: author is $author_name <$author_email>, not the repo owner
+            (<$owner_email>).
+            That is correct for an outside contributor. If it is a placeholder
+            or someone else's account, GitHub will credit the wrong person -
+            fix it before pushing:
+              git commit --amend --reset-author
+EOF
+fi
 
 # --- 1. No AI/bot trailers in commit messages -------------------------------
 # The repo owner requires commit bodies to contain no agent names at all.

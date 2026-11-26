@@ -10,7 +10,10 @@ skipped:
 2. **Verify, then report.** Build release with
    `CARGO_TARGET_DIR=G:\nex-target` and run the relevant gate. Never claim a
    check passed unless it was run.
-3. **Commit identity.** Author is the repo owner. Commit bodies must contain no
+3. **Commit identity.** Author is the human responsible for the change — the repo
+   owner here, an outside contributor on their own PR — under their own real
+   address; never a bot, an AI, or a placeholder like `<your-email@example.com>`,
+   which GitHub credits to whoever registered it. Commit bodies must contain no
    AI/bot names, signatures, or co-author trailers. Do not commit unless asked.
 4. **Process boundaries.** UI (Medium IL) never indexes; indexer (Medium IL)
    never renders; helper (High IL) is a broker only.

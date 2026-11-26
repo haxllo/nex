@@ -12,7 +12,11 @@
    allowed, no matter how complete the implementation looks.
 3. **Verify, then report.** Use the release profile and `G:\nex-target`, run the
    relevant gate, and never claim a check passed unless it was run.
-4. **Commit identity.** Author is the repo owner; commit bodies contain no
+4. **Commit identity.** Author is the human responsible for the change — the
+   repo owner here, an outside contributor on their own pull request — using
+   their own real address. Never a bot, an AI, or a placeholder like
+   `<your-email@example.com>`: GitHub credits a commit to whoever owns the author
+   email, so a placeholder silently credits a stranger. Commit bodies contain no
    AI/bot names or co-author trailers. Do not commit unless asked.
 5. **Process boundaries.** UI (Medium IL) never indexes; indexer (Medium IL)
    never renders; helper (High IL) is a broker, not a supervisor. See
@@ -207,10 +211,11 @@ active meanwhile. The snapshot-sync loop respawns a dead indexer.
 
 ## Agent Tooling
 
-- `scripts/git-hooks/commit-msg` enforces the non-negotiables: it strips AI
-  co-author trailers, rejects a commit that changes `apps/`, `scripts/`, or
-  `manifests/` without a `CIQ-<n>` id, and rejects an issue commit made on
-  `master`/`main` (staged changes survive, so the commit is redone on a
+- `scripts/git-hooks/commit-msg` enforces the non-negotiables: it refuses a
+  placeholder, test or bot author identity (and notes an author that is not the
+  owner), strips AI co-author trailers, rejects a commit that changes `apps/`,
+  `scripts/`, or `manifests/` without a `CIQ-<n>` id, and rejects an issue commit
+  made on `master`/`main` (staged changes survive, so the commit is redone on a
   branch). Enable it per clone with `git config core.hooksPath scripts/git-hooks`.
   Exceptional commits can bypass once via `NEX_ALLOW_NO_LINEAR=1` (no id) or
   `NEX_ALLOW_MASTER_COMMIT=1` (issue commit on master).
@@ -333,11 +338,28 @@ Artifacts land in `artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe}` + ma
 
 ## Git Commit Author
 
-All commits MUST use the repo owner's identity. Never commit with a bot/AI name.
+All commits MUST be attributed to the human who is responsible for the change,
+under their own real email address. In this repo that is the owner; on a
+contributor's pull request it is that contributor. Never commit with a bot/AI
+name and never with a placeholder.
 
 ```bash
 git commit --author="Habeeb <mshabeeburrahman786@gmail.com>" -m "message"
 ```
+
+Why the email matters: GitHub credits a commit to the account that owns the
+author *email*, not the name. A commit made as `<your-email@example.com>` — git's
+unconfigured default — is credited to whichever stranger registered that address;
+this repo has exactly one such commit and it put an unrelated person on the
+contributors list. `scripts/git-hooks/commit-msg` refuses reserved/test
+addresses, bot identities and addresses with no domain, and prints a note when
+the author is not the owner (an outside contributor is not blocked).
+`NEX_OWNER_EMAIL` changes whose address counts as the owner's.
+
+An agent working for someone commits under **that person's** identity, not its
+own: the human is accountable for the change, and attribution must point at a
+person. That is not licence to borrow a name — use the address of the person who
+owner the work and can answer for it.
 
 **Note**: Use this identity for any git operation that requires an author (commits, amends, rebases, etc.).
 

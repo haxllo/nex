@@ -53,6 +53,15 @@ and dropped when the target is missing; a bare AppUserModelID
 filter runs every pass, and its schema stamp is bumped whenever the filtering
 changes so a cached app list cannot keep the stale rows.
 
+An application pass runs two seconds after a change is seen, then again after 1,
+2, 4 and 8 seconds. The follow-ups are not padding: an installer writes over
+several seconds, and the shell's own view of the Start-menu folder lags the
+filesystem, so the first pass after an install can legitimately see nothing. Each
+pass also asks the shell that the roots changed (`SHChangeNotify(SHCNE_UPDATEDIR)`)
+before reading them. Measured here, a new shortcut reached the index in 3.5 s and a
+deleted one in 2.5 s, where a single pass left the first install waiting for the
+ten-minute reconcile.
+
 An application pass is skipped while its stamp is unchanged and the last scan is
 recent, so the stamp has to be able to see an install. It carries each Start-menu
 root's modification time for that reason: a new shortcut changes it. The app

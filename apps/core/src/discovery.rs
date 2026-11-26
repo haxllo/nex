@@ -277,6 +277,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
                     ));
                     HashMap::new()
                 });
+            refresh_shell_folder_views(&self.roots);
             let mut items = Vec::new();
             for root in &self.roots {
                 items.extend(discover_start_menu_root(root, &uninstall_publishers)?);
@@ -1778,6 +1779,40 @@ pub(crate) fn application_shortcut_roots() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
+/// Tell the shell a Start-menu root changed, before reading it.
+///
+/// The `AppsFolder` view is cached per process, so a shortcut created a second ago
+/// was missing from the enumeration while the same directory walk saw it - measured
+/// here: a new shortcut was skipped by the pass two seconds after it appeared and
+/// found by the pass five seconds later. \`SHChangeNotify(SHCNE_UPDATEDIR)\` is the
+/// documented way to say "this directory's contents changed", which invalidates
+/// that cached view; without it the sleep is the shell's, not ours.
+#[cfg(target_os = "windows")]
+fn refresh_shell_folder_views(roots: &[PathBuf]) {
+    use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEDIR, SHCNF_PATHW};
+
+    for root in roots {
+        let wide = to_wide_path(root.as_os_str());
+        // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call,
+        // and SHCNF_PATHW says exactly that. The shell only reads it.
+        unsafe {
+            SHChangeNotify(
+                SHCNE_UPDATEDIR as i32,
+                SHCNF_PATHW,
+                wide.as_ptr() as *const core::ffi::c_void,
+                std::ptr::null(),
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn to_wide_path(path: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.encode_wide().chain(std::iter::once(0)).collect()
+}
+
 fn discover_start_menu_root(
     root: &Path,
     uninstall_publishers: &HashMap<String, String>,

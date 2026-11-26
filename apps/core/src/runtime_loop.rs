@@ -2717,6 +2717,13 @@ impl RuntimeWorker {
                                                     "[nex] uninstall refresh failed: {error}"
                                                 )),
                                             }
+                                        } else {
+                                            // The indexer owns the app pass and usually
+                                            // holds the lock; the watcher's follow-up
+                                            // passes prune the row instead.
+                                            log_info(
+                                                "[nex] uninstall refresh deferred to the app watcher (service busy)",
+                                            );
                                         }
                                         self.overlay.set_status_text("");
                                         if reset {

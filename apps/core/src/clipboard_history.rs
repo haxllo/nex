@@ -399,21 +399,56 @@ fn load_entries(cfg: &Config) -> Vec<ClipboardEntry> {
 
 fn load_entries_from_disk(cfg: &Config) -> Vec<ClipboardEntry> {
     let path = history_path(cfg);
-    let Ok(raw) = std::fs::read(path) else {
+    let Ok(raw) = std::fs::read(&path) else {
         return Vec::new();
     };
-    let decrypted = dpapi_try_decrypt(&raw)
-        .or_else(|| {
+    let decrypted = match dpapi_try_decrypt(&raw) {
+        Some(bytes) => bytes,
+        None => match std::str::from_utf8(&raw) {
             // Legacy plaintext JSON — first read on this format triggers an
             // upgrade: the next save_entries call will rewrite it encrypted.
-            std::str::from_utf8(&raw).ok().map(|s| s.as_bytes().to_vec())
-        })
-        .unwrap_or(raw);
-    let stored: Vec<StoredEntry> = serde_json::from_slice(&decrypted).unwrap_or_default();
-    stored
-        .into_iter()
-        .map(|entry| entry.into_entry(cfg))
-        .collect()
+            Ok(text) if text.trim_start().starts_with('[') => text.as_bytes().to_vec(),
+            // Neither decryptable nor plaintext: this is a blob from another user
+            // or machine (DPAPI keys are per-user), or a truncated file.
+            _ => {
+                return preserve_unreadable_history(
+                    &path,
+                    "it is neither a blob this user can decrypt nor plaintext JSON",
+                )
+            }
+        },
+    };
+
+    match serde_json::from_slice::<Vec<StoredEntry>>(&decrypted) {
+        Ok(stored) => stored
+            .into_iter()
+            .map(|entry| entry.into_entry(cfg))
+            .collect(),
+        Err(error) => preserve_unreadable_history(&path, &format!("it does not parse: {error}")),
+    }
+}
+
+/// Keep a history file we cannot read instead of pretending it was empty.
+///
+/// The old code turned any unreadable file into an empty history, cached that, and
+/// the next capture wrote it back over the original - so a DPAPI failure (a copied
+/// profile, a machine restore, a key reset) silently destroyed every saved entry.
+/// Moving the file aside costs nothing and keeps it recoverable by hand; the history
+/// then starts empty, which is what the user sees either way, but the data is still
+/// on disk and the log says where.
+fn preserve_unreadable_history(path: &std::path::Path, reason: &str) -> Vec<ClipboardEntry> {
+    let stamp = now_epoch_secs();
+    let aside = path.with_file_name(format!("clipboard-history.unreadable-{stamp}.json"));
+    crate::logging::warn(&format!(
+        "[nex] clipboard history could not be read ({reason}); kept at {}",
+        aside.display()
+    ));
+    if let Err(error) = std::fs::rename(path, &aside) {
+        crate::logging::warn(&format!(
+            "[nex] clipboard history could not be moved aside: {error}"
+        ));
+    }
+    Vec::new()
 }
 
 fn save_entries(cfg: &Config, entries: &[ClipboardEntry]) -> Result<(), String> {
@@ -1408,6 +1443,43 @@ mod tests {
             image_height: Some(320),
             image_hash: Some(hash),
         }
+    }
+
+    /// A history file that cannot be read must never be replaced by an empty one.
+    /// DPAPI keys are per-user, so a copied profile or a restored machine makes the
+    /// old blob unreadable, and the previous code answered that with an empty list
+    /// which the next capture wrote back over the original.
+    #[test]
+    fn an_unreadable_history_file_is_kept_not_overwritten() {
+        let dir = temp_dir("unreadable");
+        let cfg = test_config(&dir);
+        let path = history_path(&cfg);
+        // Not a DPAPI blob and not JSON: the shape of a file from another user.
+        let original = vec![0x01u8, 0x02, b' ', b'n', b'o', b't', 0xFF];
+        std::fs::write(&path, &original).expect("write");
+
+        let entries = load_entries(&cfg);
+        assert!(entries.is_empty(), "an unreadable file reads as no history");
+
+        let kept: Vec<_> = std::fs::read_dir(&dir)
+            .expect("dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("clipboard-history.unreadable-")
+            })
+            .collect();
+        assert_eq!(kept.len(), 1, "the unreadable file must be kept, not dropped");
+        assert_eq!(std::fs::read(kept[0].path()).expect("read"), original);
+
+        // The next capture writes a fresh file and leaves the kept one alone.
+        save_entries(&cfg, &[image_entry(7, None)]).expect("save");
+        assert!(path.is_file());
+        assert_eq!(std::fs::read(kept[0].path()).expect("read"), original);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The whole point of the stored shape: a thumbnail is a file, not an array

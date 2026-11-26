@@ -60,28 +60,44 @@ jobs:
           echo "::error::This PR changes apps/, scripts/, or manifests/ but names no Linear issue (CIQ-<n>) in its title or body."
           exit 1
 
+      # Runs on a pull request and on a push to master. A squash merge lands as a
+      # plain push, so gating this on `pull_request` alone meant the document check
+      # never saw the commit that actually reached master.
       - name: Require docs update for behaviour changes
-        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          BEFORE_SHA: ${{ github.event.before }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate \
-            --jq '.[].filename' > "$RUNNER_TEMP/changed.txt"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate \
+              --jq '.[].filename' > "$RUNNER_TEMP/changed.txt"
+            REASON_SOURCE="$PR_BODY"
+          else
+            # A push carries no pull-request body, so the bypass reason is read from
+            # the head commit message instead. A change pushed straight to master
+            # therefore has to carry the marker in its own message.
+            if printf '%s' "$BEFORE_SHA" | grep -Eq '^0+$'; then
+              git diff --name-only HEAD~1 HEAD > "$RUNNER_TEMP/changed.txt"
+            else
+              git diff --name-only "$BEFORE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"
+            fi
+            REASON_SOURCE="$(git log -1 --pretty=%B)"
+          fi
+          echo "changed files:"; cat "$RUNNER_TEMP/changed.txt"
           # Escape hatch, so an agent that has genuinely decided a document is
-          # unaffected can still land the change. The marker has to be in the PR
-          # body, and it has to carry a reason: a bypass with no stated judgment
-          # is indistinguishable from an oversight.
-          if printf '%s' "$PR_BODY" | grep -q 'NEX_ALLOW_STALE_DOCS'; then
-            if printf '%s' "$PR_BODY" | grep -Eq 'NEX_ALLOW_STALE_DOCS=1:[[:space:]]*[^[:space:]]'; then
-              echo "PR body carries NEX_ALLOW_STALE_DOCS with a reason; running the gate in bypass mode."
+          # unaffected can still land the change. The marker has to carry a reason:
+          # a bypass with no stated judgment is indistinguishable from an oversight.
+          if printf '%s' "$REASON_SOURCE" | grep -q 'NEX_ALLOW_STALE_DOCS'; then
+            if printf '%s' "$REASON_SOURCE" | grep -Eq 'NEX_ALLOW_STALE_DOCS=1:[[:space:]]*[^[:space:]]'; then
+              echo "Bypass marker with a reason found; running the gate in bypass mode."
               NEX_ALLOW_STALE_DOCS=1 scripts/check-docs-currency.sh < "$RUNNER_TEMP/changed.txt"
               exit 0
             fi
-            echo "::error::The PR body mentions NEX_ALLOW_STALE_DOCS but gives no reason. Write 'NEX_ALLOW_STALE_DOCS=1: <why the document is unaffected>'."
+            echo "::error::NEX_ALLOW_STALE_DOCS is mentioned but gives no reason. Write 'NEX_ALLOW_STALE_DOCS=1: <why the document is unaffected>' in the pull request body, or in the commit message for a direct push to master."
             exit 1
           fi
           scripts/check-docs-currency.sh < "$RUNNER_TEMP/changed.txt"

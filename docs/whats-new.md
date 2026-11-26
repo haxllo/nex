@@ -1,4 +1,4 @@
-<!-- release: 3.3.0 -->
+<!-- release: 3.4.0 -->
 <!--
   WHAT THIS FILE IS
   The page people see inside Nex, in the What's New view, after they update.
@@ -152,28 +152,27 @@
 
 -->
 
-## Fixes and adjustments
+## Updates and app rows
 
-The panel looks different. What is behind it now shows through, slightly enlarged, with a bright edge that fades into the middle, and corners that are round without a straight piece left over.
+Most of what changed here happens in the moments after you install or remove something. The rest is small, and you will only notice it when it is not there.
 
-The rest of the release is about the moments around the panel: opening it, quitting, and settings.
+### Updating
 
-### The glass
+- **An update no longer leaves Nex stopped.** If the installer cannot replace the files, Nex puts the previous install back and starts it, instead of quitting and leaving you without it.
+- **The updater is now part of Nex** rather than a script it launched. It also gives up on an installer that hangs instead of waiting forever.
+- **A failed update check says so.** It used to report "up to date" whether or not it had reached the server.
 
-- **You can see through it.** What is behind the panel appears a little larger, so it reads as a thick pane of glass rather than a hole cut in the desktop.
-- **The edge is bright and soft.** It fades into the middle instead of ending in a line.
-- **The corners are fully round.** No short straight side where the curve meets the edge.
-- **Text near the edge has no colour fringe.**
-- **The tint follows what is behind it.** A dark window underneath makes the panel read deeper.
+### Apps
 
-### The hotkey
+- **A newly installed program appears without restarting Nex.**
+- **A program you uninstalled stops appearing** once it is gone from disk, and a Quick Launch pin whose target is missing is hidden until it comes back.
+- **Right-click Uninstall names the program it matched** before anything runs.
+- **A Microsoft Store app opens Installed apps**, where Windows can show its own progress, instead of a silent command with nothing on screen.
+- **A one-letter search keeps its apps.** Some letters showed a single app while the files listed normally.
 
-- **Fixed:** the first press after the machine had been idle opened the panel slowly.
-- **Fixed:** Start could open on the same press as the panel.
-- **Fixed:** the hotkey could stop working for a while when a program running as administrator had been in front.
+### Search and startup
 
-### Quitting and settings
-
-- **Fixed:** opening settings closed Nex.
-- **Fixed:** quitting took several seconds, then said Nex was not running.
-- **Fixed:** the mouse froze for a moment as Nex closed.
+- **The first keystroke is faster**, and the panel no longer opens slowly after an idle period.
+- **A launch that fails now says so** instead of doing nothing.
+- **A folder you cannot open yet is remembered**, instead of being ignored until Nex restarts.
+- **The panel opens in compact view**, with grid view off; both are still in Settings.

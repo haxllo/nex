@@ -521,6 +521,24 @@ pub(crate) fn config_file_modified_time(path: &std::path::Path) -> Option<System
 }
 
 #[cfg(target_os = "windows")]
+/// What a config poll actually decided.
+///
+/// The caller used to clone the whole `Config` and deep-compare it after every
+/// call to find out whether anything had changed, on every event. The poll
+/// already knows: it returns that here, so the caller can sync the search
+/// worker's shared config only when the answer is "something" (CIQ-257).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ConfigReload {
+    /// The file changed and was applied to the runtime's config.
+    pub applied: bool,
+    /// The applied config actually differs from the one it replaced. A save
+    /// that only touched the file (mtime, comments) reports `applied` without
+    /// this, so nothing derived from the config is invalidated for it.
+    pub values_changed: bool,
+    /// The hotkey changed, so the listener has to be retargeted or re-registered.
+    pub hotkey_changed: bool,
+}
+
 pub(crate) fn maybe_apply_runtime_config_reload(
     overlay: &NativeOverlayShell,
     service: &CoreService,
@@ -532,16 +550,16 @@ pub(crate) fn maybe_apply_runtime_config_reload(
     max_results: &mut usize,
     watcher: &mut RuntimeConfigWatcher,
     background_index_refresh: &mut BackgroundIndexRefresh,
-) -> bool {
+) -> ConfigReload {
     if !watcher.dirty.swap(false, Ordering::AcqRel)
         && watcher.last_checked.elapsed() < CONFIG_RELOAD_POLL_INTERVAL
     {
-        return false;
+        return ConfigReload::default();
     }
     watcher.last_checked = Instant::now();
     let modified = config_file_modified_time(watcher.path.as_path());
     if modified == watcher.last_modified {
-        return false;
+        return ConfigReload::default();
     }
     watcher.last_modified = modified;
 
@@ -555,6 +573,7 @@ pub(crate) fn maybe_apply_runtime_config_reload(
             let mut discovery_reindex_queued = false;
             *runtime_config = next_config;
             *max_results = runtime_config.max_results as usize;
+            let values_changed = *runtime_config != previous;
 
             overlay.set_performance_tuning(
                 runtime_config.idle_cache_trim_ms,
@@ -652,13 +671,17 @@ pub(crate) fn maybe_apply_runtime_config_reload(
                 // status that resurfaces on the next show.
                 overlay.set_status_text("");
             }
-            return hotkey_changed;
+            return ConfigReload {
+                applied: true,
+                values_changed,
+                hotkey_changed,
+            };
         }
         Err(error) => {
             log_warn(&format!(
                 "[nex] config reload skipped due to invalid config: {error}"
             ));
-            return false;
+            return ConfigReload::default();
         }
         }
     }

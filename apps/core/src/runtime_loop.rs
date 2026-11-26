@@ -426,6 +426,9 @@ pub(crate) fn run_windows_runtime(
         hotkey_check_counter: 0,
         last_foreground_hwnd: 0,
         last_memory_log: Instant::now(),
+        last_hotkey_liveness: Instant::now(),
+        shared_config_generation: 0,
+        housekeeping_us: Vec::with_capacity(HOUSEKEEPING_SAMPLE_WINDOW),
         quick_launch_items: Vec::new(),
         quick_launch_loaded: false,
         apps_expanded: None,
@@ -598,6 +601,14 @@ fn media_control(action: crate::media::MediaAction, overlay: &NativeOverlayShell
 /// is noise. Flip back to `true` to restore it.
 const SHOW_ALL_APPS_ENTRY: bool = false;
 
+/// How often the hotkey listener's thread is checked for liveness. This was
+/// every 32 events, which is this interval at the 250 ms tick and much faster
+/// while someone is typing; a fixed interval says what it means (CIQ-257).
+const HOTKEY_LIVENESS_INTERVAL: Duration = Duration::from_secs(8);
+
+/// Housekeeping samples kept between the p50/p99 lines the perf log emits.
+const HOUSEKEEPING_SAMPLE_WINDOW: usize = 128;
+
 /// Ask the indexer to apply the recent-documents recency overlay.
 ///
 /// The indexer owns the store and the shell-MRU scan; it enforces its own
@@ -656,6 +667,15 @@ struct RuntimeWorker {
     /// recomputed when focus actually moves.
     last_foreground_hwnd: isize,
     last_memory_log: Instant,
+    /// Last time the hotkey listener's liveness was checked.
+    last_hotkey_liveness: Instant,
+    /// `config_generation` as last pushed into `shared_config` and
+    /// `shared_plugin_registry`. Equal generations mean the search worker
+    /// already has this config, so the clones and write locks are skipped.
+    shared_config_generation: u64,
+    /// Durations of recent housekeeping passes (microseconds), reported as
+    /// p50/p99 every `HOUSEKEEPING_SAMPLE_WINDOW` passes.
+    housekeeping_us: Vec<u32>,
     /// Quick Launch items for idle state display.
     quick_launch_items: Vec<crate::overlay::model::QuickLaunchItem>,
     /// Whether Quick Launch items have been loaded for current session.
@@ -1318,6 +1338,13 @@ impl RuntimeWorker {
     fn save_config_and_prevent_reload(&mut self) -> Result<(), String> {
         crate::config::save(&self.runtime_config)
             .map_err(|e| format!("save failed: {e}"))?;
+        // An in-process save is a config change like any other: it has to move
+        // the generation so the search worker's shared copy is refreshed on the
+        // next housekeeping pass, and so results derived from the old config
+        // are dropped. This is what the old unconditional shared-config write in
+        // the event preamble used to cover (CIQ-257).
+        self.config_generation = self.config_generation.wrapping_add(1);
+        self.last_sent_generation = 0;
         // Update the watcher's last_modified to the current file time
         // so the config reloader doesn't see it as "changed" and overwrite our in-memory state.
         if let Some(modified) = crate::runtime_index::config_file_modified_time(&self.runtime_config.config_path) {
@@ -1607,25 +1634,44 @@ impl RuntimeWorker {
         }
     }
 
-    fn on_event(&mut self, event: OverlayEvent) {
-        self.hotkey_check_counter = self.hotkey_check_counter.wrapping_add(1);
-
-        // Keep the helper's game-mode verdict current. It has to be pushed
-        // before a press, and the helper owns Win detection, so nex cannot
-        // decide at press time.
-        crate::runtime_hotkey::refresh_helper_game_mode(
-            &self.runtime_config,
-            &mut self.last_foreground_hwnd,
-        );
-
-        // Diagnostic: heartbeat every 128 events (Tick or otherwise)
-        if self.hotkey_check_counter % 128 == 0 {
-            log_info(&format!(
-                "[nex::diag] worker alive counter={} event={:?}",
-                self.hotkey_check_counter,
-                event,
-            ));
+    /// Record one housekeeping pass and report p50/p99 every
+    /// `HOUSEKEEPING_SAMPLE_WINDOW` of them.
+    ///
+    /// The audit that filed CIQ-257 could only say the preamble's cost "needs
+    /// measurement". One line per ~32 s of ticks turns that into a number in
+    /// `nex.log`, so a regression here is visible without a profiler.
+    fn record_housekeeping(&mut self, elapsed: Duration) {
+        let micros = elapsed.as_micros().min(u32::MAX as u128) as u32;
+        self.housekeeping_us.push(micros);
+        if self.housekeeping_us.len() < HOUSEKEEPING_SAMPLE_WINDOW {
+            return;
         }
+        let mut sorted = self.housekeeping_us.clone();
+        sorted.sort_unstable();
+        log_info(&format!(
+            "[nex::perf] housekeeping n={} p50_us={} p99_us={} max_us={}",
+            sorted.len(),
+            percentile_us(&sorted, 50),
+            percentile_us(&sorted, 99),
+            sorted[sorted.len() - 1],
+        ));
+        self.housekeeping_us.clear();
+    }
+
+    /// The work a tick does, whoever it is that woke the worker: the config
+    /// poll, the shared-config sync, the index-refresh apply, the
+    /// cache-generation requery, the listener liveness check and the Quick
+    /// Launch retry.
+    ///
+    /// This used to run in front of *every* event, so the typing path and the
+    /// hidden 250 ms tick each paid two `Config` clones, a deep compare and a
+    /// write-locked sync of `shared_config`/`shared_plugin_registry` for a
+    /// change that had not happened. Measured on the owner's config: ~23 us
+    /// per event of that work, with the search worker reading both locks once
+    /// per search batch. It now runs when something can actually have changed;
+    /// see `wants_housekeeping`.
+    fn housekeeping(&mut self) {
+        let started = Instant::now();
 
         if self.last_memory_log.elapsed() >= Duration::from_secs(30) {
             if let Ok(guard) = self.service.try_read() {
@@ -1634,7 +1680,11 @@ impl RuntimeWorker {
             self.last_memory_log = Instant::now();
         }
 
-        if self.hotkey_check_counter % 32 == 0 && !RE_REGISTERING.load(std::sync::atomic::Ordering::SeqCst) && !QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.last_hotkey_liveness.elapsed() >= HOTKEY_LIVENESS_INTERVAL
+            && !RE_REGISTERING.load(std::sync::atomic::Ordering::SeqCst)
+            && !QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.last_hotkey_liveness = Instant::now();
             let needs_restart = match self.hotkey_listener.lock() {
                 Ok(guard) => match guard.as_ref() {
                     Some(listener) => !listener.is_alive(),
@@ -1705,8 +1755,7 @@ impl RuntimeWorker {
         let mut needs_reregister: Option<String> = None;
 
         if let Ok(svc) = self.service.try_write() {
-            let previous_config = self.runtime_config.clone();
-            let hotkey_changed = maybe_apply_runtime_config_reload(
+            let reload = maybe_apply_runtime_config_reload(
                 &self.overlay,
                 &*svc,
                 &self.service,
@@ -1718,7 +1767,7 @@ impl RuntimeWorker {
                 &mut self.config_watcher,
                 &mut self.background_index_refresh,
             );
-            if hotkey_changed {
+            if reload.hotkey_changed {
                 log_info(&format!(
                     "[nex] config hotkey changed, applying live for '{}'",
                     self.runtime_config.hotkey,
@@ -1737,19 +1786,11 @@ impl RuntimeWorker {
                 }
                 // Status text already set by maybe_apply_runtime_config_reload.
             }
-            // Keep the search worker's config in sync so it doesn't
-            // serve stale results with old show_files/show_folders etc.
-            if let Ok(mut cfg) = self.shared_config.write() {
-                *cfg = self.runtime_config.clone();
-            }
-            if let Ok(mut reg) = self.shared_plugin_registry.write() {
-                *reg = self.plugin_registry.clone();
-            }
-            // Invalidate search worker caches on every config reload so
-            // the worker picks up the new show_files, show_folders, dsl,
-            // and plugin toggles right away instead of serving stale
-            // results from the previous session.
-            if self.runtime_config != previous_config {
+            if reload.values_changed {
+                // A reload that changed a value invalidates every search
+                // derived from the old config. The reload itself has already
+                // dropped the session; the generation is what makes the sync
+                // below push the new config to the search worker.
                 self.config_generation = self.config_generation.wrapping_add(1);
                 self.search_worker.clear_session();
                 self.last_sent_generation = 0;
@@ -1762,6 +1803,22 @@ impl RuntimeWorker {
             // index-refresh applicator, and watcher starter will
             // retry on the next event; the cost of skipping a tick
             // is bounded by the worker's per-item critical section.
+        }
+
+        // Keep the search worker's config in sync — but only when something
+        // actually changed it. `save_config_and_prevent_reload` and the config
+        // poller both move `config_generation`, so this is one generation
+        // compare per pass instead of two `Config` clones per event. The write
+        // lock is only taken when the search worker would otherwise serve
+        // stale results (show_files/show_folders/dsl/plugin toggles).
+        if self.shared_config_generation != self.config_generation {
+            self.shared_config_generation = self.config_generation;
+            if let Ok(mut cfg) = self.shared_config.write() {
+                *cfg = self.runtime_config.clone();
+            }
+            if let Ok(mut reg) = self.shared_plugin_registry.write() {
+                *reg = self.plugin_registry.clone();
+            }
         }
 
         maybe_apply_background_index_refresh(
@@ -1861,6 +1918,37 @@ impl RuntimeWorker {
                 self.show_idle_or_quick_launch();
             }
         }
+        self.record_housekeeping(started.elapsed());
+    }
+
+    fn on_event(&mut self, event: OverlayEvent) {
+        self.hotkey_check_counter = self.hotkey_check_counter.wrapping_add(1);
+
+        // Keep the helper's game-mode verdict current. It has to be pushed
+        // before a press, and the helper owns Win detection, so nex cannot
+        // decide at press time.
+        crate::runtime_hotkey::refresh_helper_game_mode(
+            &self.runtime_config,
+            &mut self.last_foreground_hwnd,
+        );
+
+        // Diagnostic: heartbeat every 128 events (Tick or otherwise)
+        if self.hotkey_check_counter % 128 == 0 {
+            log_info(&format!(
+                "[nex::diag] worker alive counter={} event={:?}",
+                self.hotkey_check_counter,
+                event,
+            ));
+        }
+
+        // Housekeeping is fixed cost, not per-event cost: the config poll
+        // and its clones, the shared-config sync, the index-refresh apply, the
+        // cache-generation requery and the Quick Launch retry run on the 250 ms
+        // tick and after config-changing events only (CIQ-257).
+        if wants_housekeeping(&event) {
+            self.housekeeping();
+        }
+
         match event {
             OverlayEvent::Hotkey(_) => {
                 if self.settings_open {
@@ -2300,6 +2388,9 @@ impl RuntimeWorker {
                                     *cfg = self.runtime_config.clone();
                                 }
                                 self.config_generation += 1;
+                                // The sync above is current for this generation,
+                                // so the next housekeeping pass has nothing to do.
+                                self.shared_config_generation = self.config_generation;
                                 self.search_worker.clear_session();
                                 self.overlay.set_grid_view(self.runtime_config.grid_view);
                                 self.overlay.set_compact_view(
@@ -3112,6 +3203,38 @@ impl RuntimeWorker {
     }
 }
 
+/// Nearest-rank percentile of an ascending slice of microseconds.
+fn percentile_us(sorted: &[u32], percentile: usize) -> u32 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    // ceil(percentile/100 * len), clamped into the slice; rank 1 is the
+    // smallest sample, not index 0 of a zero-based ranking.
+    let rank = (percentile * sorted.len()).div_ceil(100);
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+/// Fixed cost belongs on the tick, not on every event: the typing path and the
+/// hidden 250 ms tick were both paying for a config poll, its clones and a
+/// write-locked sync that had nothing to do (CIQ-257).
+///
+/// `Tick` drives the steady state — the config watcher sends one when the file
+/// changes. The rest are the events that mutate config in-process, so the sync
+/// lands immediately instead of on the next tick.
+fn wants_housekeeping(event: &OverlayEvent) -> bool {
+    matches!(
+        event,
+        OverlayEvent::Tick
+            | OverlayEvent::PinApp(_)
+            | OverlayEvent::UnpinApp(_)
+            | OverlayEvent::AddToQuickLaunch(_)
+            | OverlayEvent::Bookmark(..)
+            | OverlayEvent::BookmarkIconReady(..)
+            | OverlayEvent::TrayToggleGameMode
+            | OverlayEvent::SaveSettings(_)
+    )
+}
+
 /// Bring the panel back so a failure it has to report is on screen, and keep
 /// `OverlayState` in step with the window that is now visible. Free function
 /// so the re-show contract is testable without a whole `RuntimeWorker`.
@@ -3511,6 +3634,42 @@ fn looks_like_pin_path(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fixed cost belongs on the tick. Putting it back on the per-event path is
+    /// what CIQ-257 was about, so the split is asserted rather than described.
+    #[test]
+    fn housekeeping_stays_off_the_typing_path() {
+        // The 250 ms tick is the steady state, and these mutate config in-process.
+        assert!(wants_housekeeping(&OverlayEvent::Tick));
+        assert!(wants_housekeeping(&OverlayEvent::PinApp("Code".into())));
+        assert!(wants_housekeeping(&OverlayEvent::UnpinApp("Code".into())));
+        assert!(wants_housekeeping(&OverlayEvent::AddToQuickLaunch(
+            "C:\\Code.exe".into()
+        )));
+        assert!(wants_housekeeping(&OverlayEvent::Bookmark(
+            "t".into(),
+            "https://example.com".into(),
+            false
+        )));
+        assert!(wants_housekeeping(&OverlayEvent::TrayToggleGameMode));
+        assert!(wants_housekeeping(&OverlayEvent::SaveSettings("{}".into())));
+
+        // Typing, results and presses must not pay for it.
+        assert!(!wants_housekeeping(&OverlayEvent::QueryChanged("ner".into())));
+        assert!(!wants_housekeeping(&OverlayEvent::SearchResultsReady));
+        assert!(!wants_housekeeping(&OverlayEvent::MoveSelection(1)));
+        assert!(!wants_housekeeping(&OverlayEvent::Submit));
+        assert!(!wants_housekeeping(&OverlayEvent::Hotkey(0)));
+    }
+
+    #[test]
+    fn percentile_uses_nearest_rank() {
+        let sorted = [1u32, 2, 3, 4, 100];
+        assert_eq!(percentile_us(&sorted, 50), 3);
+        assert_eq!(percentile_us(&sorted, 99), 100);
+        assert_eq!(percentile_us(&sorted, 1), 1);
+        assert_eq!(percentile_us(&[], 50), 0);
+    }
 
     /// A launch hides the panel first, so the status line a failure writes has
     /// to be on a panel that comes back. Otherwise the user sees the panel

@@ -2628,7 +2628,8 @@ html.bg-white #panel {
 
 /* CSS outline fallback for systems where DWM cannot own the opaque edge. */
 html.bg-black #panel::after,
-html.bg-white #panel::after {
+html.bg-white #panel::after,
+html.bg-acrylic #panel::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -2643,6 +2644,14 @@ html.bg-black #panel::after {
 
 html.bg-white #panel::after {
   border-color: rgba(0, 0, 0, 0.12);
+}
+
+/* Acrylic is a flat sheet, so it gets a flat edge: one colour, all four sides,
+   the whole way round. The glass rim is directional (lit from a corner and
+   faded), which on this material leaves the border missing in places - that
+   bevel belongs to glass only. */
+html.bg-acrylic #panel::after {
+  border-color: var(--panel-edge);
 }
 
 /* DWM owns the outline when it also owns the opaque window corners. */

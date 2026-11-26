@@ -381,7 +381,13 @@ impl Default for QuickLaunchConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelBackground {
+    /// Live refraction over the captured desktop.
     Glass,
+    /// The same backdrop capture and the same silhouette, with the lens
+    /// stages switched off: a frosted, tinted sheet of the desktop behind the
+    /// panel. Corners come from the shared `CORNER_RADIUS` mask, so an acrylic
+    /// panel and a glass one have the same outline.
+    Acrylic,
     #[default]
     Black,
     White,
@@ -391,6 +397,7 @@ impl PanelBackground {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "glass" | "transparent" | "liquid" => Some(Self::Glass),
+            "acrylic" | "blur" | "frosted" | "translucent" => Some(Self::Acrylic),
             "black" | "dark" => Some(Self::Black),
             "white" | "light" => Some(Self::White),
             _ => None,
@@ -400,14 +407,16 @@ impl PanelBackground {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Glass => "glass",
+            Self::Acrylic => "acrylic",
             Self::Black => "black",
             Self::White => "white",
         }
     }
 
-    /// Opaque modes paint solid and park the glass layer.
+    /// Opaque modes paint solid and park the glass layer. Acrylic is not one:
+    /// it is drawn by the same GPU layer as glass, just without the lens.
     pub fn is_opaque(self) -> bool {
-        !matches!(self, Self::Glass)
+        matches!(self, Self::Black | Self::White)
     }
 }
 
@@ -500,6 +509,7 @@ mod panel_background_tests {
     #[test]
     fn parse_known_values() {
         assert_eq!(PanelBackground::parse("glass"), Some(PanelBackground::Glass));
+        assert_eq!(PanelBackground::parse("Acrylic"), Some(PanelBackground::Acrylic));
         assert_eq!(PanelBackground::parse("Black"), Some(PanelBackground::Black));
         assert_eq!(PanelBackground::parse("WHITE"), Some(PanelBackground::White));
     }
@@ -514,11 +524,22 @@ mod panel_background_tests {
     fn as_str_round_trip() {
         for v in [
             PanelBackground::Glass,
+            PanelBackground::Acrylic,
             PanelBackground::Black,
             PanelBackground::White,
         ] {
             assert_eq!(PanelBackground::parse(v.as_str()), Some(v));
         }
+    }
+
+    /// Acrylic is drawn by the GPU layer, not painted opaque. Reporting it as
+    /// opaque parks the renderer and leaves the panel solid (CIQ-294).
+    #[test]
+    fn only_black_and_white_are_opaque() {
+        assert!(!PanelBackground::Glass.is_opaque());
+        assert!(!PanelBackground::Acrylic.is_opaque());
+        assert!(PanelBackground::Black.is_opaque());
+        assert!(PanelBackground::White.is_opaque());
     }
 
     #[test]
@@ -1101,7 +1122,7 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("grid_view = ");
     text.push_str(if cfg.grid_view { "true" } else { "false" });
     text.push('\n');
-    text.push_str("# Panel background: glass (live refraction) | black (opaque) | white (opaque)\n");
+    text.push_str("# Panel background: glass (live refraction) | acrylic (frosted blur) | black (opaque) | white (opaque)\n");
     text.push_str("panel_background = ");
     text.push_str(&json_string(cfg.panel_background.as_str()));
     text.push('\n');

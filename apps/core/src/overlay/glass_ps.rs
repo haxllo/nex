@@ -110,7 +110,52 @@ impl Look {
             shadow: [0.16, 2.0, 30.0],
         }
     }
+
+    /// Acrylic: the same backdrop, the same silhouette, no lens.
+    ///
+    /// The bend (`depth`), the colour split (`dispersion`) and the middle zoom
+    /// are zero here, so the shader's optics come out flat and the panel reads
+    /// as a frosted sheet of what is behind it rather than as glass. The frost
+    /// is deliberately much wider than the lens ever asks for — that wide, even
+    /// blur is the whole look.
+    ///
+    /// There is **no rim light at all**. The lens rim is directional: it is lit
+    /// from one corner and fades around the outline, so on a lens it reads as a
+    /// bevel. On a flat sheet it reads as a border that is missing in places.
+    /// Non-glass themes draw an even 1 px outline on the page instead (see
+    /// `html.bg-acrylic #panel::after`), which is what a specular bevel is not.
+    ///
+    /// `rim_frost` is 1.0, which means "the frost is the same at the edge as in
+    /// the middle". The lens drops it to 0.12 so the outermost ring samples the
+    /// backdrop sharp and the bend stays visible; on a sheet with no bend that
+    /// same term paints a ring of unblurred wallpaper around a frosted panel,
+    /// which reads as a transparent rim.
+    pub fn acrylic(tint: [f32; 4]) -> Look {
+        Look {
+            depth: 0.0,
+            bezel: 0.421,
+            max_bezel: 44.0,
+            zoom: 1.0,
+            dispersion: 0.0,
+            blur: ACRYLIC_BLUR,
+            saturate: 1.12,
+            lum: 1.0,
+            contrast: 0.98,
+            rim: 0.0,
+            rim_width: 0.0,
+            shade: 0.0,
+            light: -135.0,
+            rim_frost: 1.0,
+            tint,
+            shadow: [0.16, 2.0, 30.0],
+        }
+    }
 }
+
+/// Frost width for the acrylic material, CSS px. Wide enough to be the taskbar
+/// kind of blur at any display scale; the pyramid clamps it if the panel is too
+/// small to carry it.
+pub const ACRYLIC_BLUR: f32 = 18.0;
 
 /// The constant buffer, field for field with `cbuffer CB` in the shader.
 #[repr(C)]
@@ -513,4 +558,63 @@ unsafe fn shader_ps(
     unsafe { dev.CreatePixelShader(bytes, None, Some(&mut ps as *mut _)) }
         .map_err(|e| format!("[nex][glass] {entry} failed: {e:?}"))?;
     ps.ok_or_else(|| format!("[nex][glass] {entry} came back empty"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Look, ACRYLIC_BLUR};
+
+    /// Acrylic is the lens with its optics taken out. If any of these come back
+    /// non-zero the material bends or splits colour again, which is glass, not
+    /// acrylic (CIQ-294).
+    #[test]
+    fn acrylic_has_no_lens_optics() {
+        let look = Look::acrylic([0.0, 0.0, 0.0, 0.2]);
+        assert_eq!(look.depth, 0.0, "no sideways ray carry");
+        assert_eq!(look.dispersion, 0.0, "no colour split");
+        assert_eq!(look.zoom, 1.0, "no middle zoom");
+        assert_eq!(look.shade, 0.0, "no inner dark line");
+        // The lens rim is lit from one corner and fades around the outline. On
+        // a flat sheet that is a border missing in places, so it is switched
+        // off entirely and the page draws an even outline instead.
+        assert_eq!(look.rim, 0.0, "no directional rim light");
+        // 1.0 = frost is the same at the edge as in the middle. Anything less
+        // leaves a ring of unblurred wallpaper around the panel.
+        assert_eq!(look.rim_frost, 1.0, "uniform frost to the edge");
+    }
+
+    /// Pins the glass look. These are the values `Look::clear` has carried all
+    /// along; the acrylic work was explicitly not allowed to move any of them,
+    /// so this test is the guard: change a number here and glass changed too.
+    #[test]
+    fn lens_look_is_pinned() {
+        let look = Look::clear([0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(look.depth, 2.4);
+        assert_eq!(look.bezel, 0.421);
+        assert_eq!(look.max_bezel, 44.0);
+        assert_eq!(look.zoom, 1.03);
+        assert_eq!(look.dispersion, 0.05);
+        assert_eq!(look.blur, 2.0);
+        assert_eq!(look.saturate, 1.32);
+        assert_eq!(look.lum, 1.0);
+        assert_eq!(look.contrast, 1.0);
+        assert_eq!(look.rim, 0.25);
+        assert_eq!(look.rim_width, 0.35);
+        assert_eq!(look.shade, 0.03);
+        assert_eq!(look.light, -135.0);
+        assert_eq!(look.rim_frost, 0.12);
+        assert_eq!(look.shadow, [0.16, 2.0, 30.0]);
+        assert_eq!(look.tint, [0.1, 0.2, 0.3, 0.4]);
+    }
+
+    /// The look asked for is a wide, even frost — much wider than the lens
+    /// ever blurs — and it must stay inside what the frost pyramid can express.
+    #[test]
+    fn acrylic_frost_is_wider_than_the_lens_and_within_range() {
+        let lens = Look::clear([0.0, 0.0, 0.0, 0.0]);
+        let acrylic = Look::acrylic([0.0, 0.0, 0.0, 0.0]);
+        assert!(acrylic.blur > lens.blur * 4.0);
+        assert!(acrylic.blur >= 8.0 && acrylic.blur <= 32.0);
+        assert_eq!(acrylic.blur, ACRYLIC_BLUR);
+    }
 }

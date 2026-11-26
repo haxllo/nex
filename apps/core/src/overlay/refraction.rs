@@ -492,6 +492,26 @@ const SHOW_REFRESH_WAIT_MS: u32 = 8;
 /// a slow poll is enough, and presenting is skipped.
 const HIDDEN_POLL_MS: u64 = 500;
 
+/// What the renderer draws on the glass layer.
+///
+/// Both variants go through the same capture, the same frost pyramid and the
+/// same `rounded_mask`, so the silhouette — and therefore the corners — cannot
+/// drift between them. Only the look constants differ (CIQ-294).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelMaterial {
+    /// Live refraction: bend, dispersion, rim light.
+    #[default]
+    Lens,
+    /// Frosted shift of the backdrop, no lens.
+    Acrylic,
+}
+
+/// Acrylic tint is not the lens tint. The lens stays subtle because the bend
+/// and rim carry the edge; with those gone the sheet needs real tint under the
+/// text, so the wash is lifted and then scaled by the material's own alpha.
+const ACRYLIC_WASH_LIFT: f32 = 0.10;
+const ACRYLIC_WASH_GAIN: f32 = 2.6;
+
 /// Host -> worker config. `main_sys == 0` / `None` means unchanged.
 struct GlassConfig {
     visible: Option<bool>,
@@ -511,6 +531,9 @@ struct GlassConfig {
     /// when the show was prepared, and running the spring through that
     /// wait left only its tail visible.
     revealed: bool,
+    /// Material to draw. `None` leaves the current one alone, so a per-show
+    /// config that only carries `visible` cannot reset the theme.
+    material: Option<PanelMaterial>,
 }
 
 /// Host-facing handle. All methods are UI-thread window ops plus a
@@ -641,6 +664,7 @@ impl GlassLayer {
             theme_dark: None,
             scale: Some(scale),
             revealed: false,
+            material: None,
         });
     }
 
@@ -674,6 +698,7 @@ impl GlassLayer {
             theme_dark: None,
             scale: None,
             revealed: false,
+            material: None,
         });
     }
 
@@ -693,6 +718,7 @@ impl GlassLayer {
             theme_dark: None,
             scale: None,
             revealed: false,
+            material: None,
         });
     }
 
@@ -708,6 +734,24 @@ impl GlassLayer {
             theme_dark: Some(dark),
             scale: None,
             revealed: false,
+            material: None,
+        });
+    }
+
+    /// Which material to draw: the lens (glass) or the flat frosted sheet
+    /// (acrylic). Only the look constants change — the capture, the frost
+    /// pyramid and the silhouette mask are shared, so switching cannot move
+    /// the corners and cannot touch a pixel of the glass look.
+    pub fn set_material(&self, material: PanelMaterial) {
+        let _ = self.tx.send(GlassConfig {
+            visible: None,
+            main_sys: 0,
+            max_wh: None,
+            panel_wh: None,
+            theme_dark: None,
+            scale: None,
+            revealed: false,
+            material: Some(material),
         });
     }
 
@@ -765,6 +809,7 @@ impl GlassLayer {
                     theme_dark: None,
                     scale: None,
                     revealed: true,
+                    material: None,
                 });
                 crate::logging::info(&format!("[nex][refract] glass revealed {w}x{h}"));
                 true
@@ -1107,6 +1152,10 @@ struct Engine {
     geometry: GeometryCache<SizedGeometry>,
     tint_grid: std::cell::RefCell<Option<Vec<[f32; 4]>>>,
     light_direction: std::cell::Cell<(f32, f32, bool)>,
+    /// Which material the next frame draws: the lens (glass) or the flat
+    /// frosted sheet (acrylic). Held here so `present_shader` picks the look
+    /// per frame; the lens path itself is untouched.
+    material: std::cell::Cell<PanelMaterial>,
     source: Option<ID2D1Bitmap1>,
     /// GPU-resident backdrop crop the source bitmap wraps; captured
     /// frames are copied straight into it (no CPU round trip).
@@ -1472,6 +1521,7 @@ impl Engine {
             geometry: GeometryCache::new(),
             tint_grid: std::cell::RefCell::new(None),
             light_direction: std::cell::Cell::new((0.0, 0.0, true)),
+            material: std::cell::Cell::new(PanelMaterial::default()),
         };
         engine.rebuild_content()?;
         Ok(engine)
@@ -1926,6 +1976,13 @@ impl Engine {
         Ok(())
     }
 
+    /// Switch material. Takes effect on the next presented frame; nothing in
+    /// the lens graph is rebuilt, because the acrylic look is carried entirely
+    /// by the shader constants.
+    fn set_material(&self, material: PanelMaterial) {
+        self.material.set(material);
+    }
+
     /// Lens strength: 0 is flat, 1 is resting curvature. Small overshoot
     /// survives the clamp. Each RGB branch gets its own dispersion scale.
     fn set_bend(&self, bend: f32) {
@@ -2021,7 +2078,20 @@ impl Engine {
         .map_err(|e| format!("shader target failed: {e:?}"))?;
         let rtv = rtv.ok_or("shader target came back empty")?;
         let (r, g, b, a) = self.wash.get();
-        let look = glass_ps::Look::clear([r, g, b, a]);
+        let look = match self.material.get() {
+            PanelMaterial::Lens => glass_ps::Look::clear([r, g, b, a]),
+            // Acrylic carries more tint than the lens does: with the bend and
+            // the rim gone there is nothing else holding the rows off the
+            // backdrop, and the taskbar look this is asked for is a visibly
+            // tinted sheet. The lens band (TINT_MIN_ALPHA..TINT_MAX_ALPHA) is
+            // left exactly as it is for glass.
+            PanelMaterial::Acrylic => glass_ps::Look::acrylic([
+                r,
+                g,
+                b,
+                ACRYLIC_WASH_LIFT + a * ACRYLIC_WASH_GAIN,
+            ]),
+        };
         ps.draw(
             source,
             (
@@ -3244,6 +3314,9 @@ fn worker_main(
         flipped_at: None,
         fresh: false,
     };
+    // Last material the host asked for. Defaults to the lens so a host that
+    // never sends one (older build, tests) draws exactly what it drew before.
+    let mut panel_material = PanelMaterial::default();
     // Last material the page was told about; None forces a re-send.
     let mut palette_sent: Option<bool> = None;
     // Last adaptive-ink value sent, and when. Quantized, rate-limited:
@@ -3337,6 +3410,14 @@ fn worker_main(
             }
             if let Some(p) = cfg.panel_wh {
                 cfg_panel = Some(p);
+            }
+            if let Some(m) = cfg.material {
+                // Applies to the next presented frame. The lens numbers are
+                // untouched; `present_shader` picks a different look.
+                panel_material = m;
+                if let Some(e) = &engine {
+                    e.set_material(m);
+                }
             }
             if let Some(s) = cfg.scale { scale = s; }
             if cfg.scale.is_some() || cfg.main_sys != 0 {
@@ -3465,6 +3546,7 @@ fn worker_main(
                         }
                     }
                     e.light_direction.set(light);
+                    e.set_material(panel_material);
                     engine = Some(e);
                     n_engine_fail = 0;
                 },

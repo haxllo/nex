@@ -4830,11 +4830,14 @@
 
       // Panel background: opaque black/white paint solid and force the
       // matching palette (light text can't survive a white panel);
-      // glass follows the system theme untouched.
+      // glass and acrylic follow the system theme untouched. Acrylic is not
+      // opaque and not glass: it takes the flat 1 px outline instead of the
+      // glass rim, which is lit from one corner and reads as a broken border.
       if (typeof state.panelBackground === "string") {
         const root = document.documentElement;
         root.classList.toggle("bg-black", state.panelBackground === "black");
         root.classList.toggle("bg-white", state.panelBackground === "white");
+        root.classList.toggle("bg-acrylic", state.panelBackground === "acrylic");
         if (state.panelBackground === "white") root.dataset.theme = "light";
         else if (state.panelBackground === "black") root.dataset.theme = "dark";
       }

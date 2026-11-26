@@ -282,9 +282,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
             for root in &self.roots {
                 items.extend(discover_start_menu_root(root, &uninstall_publishers)?);
             }
-            if let Ok(system_apps) = discover_start_apps(&uninstall_publishers) {
-                items.extend(system_apps);
-            }
+            items.extend(discover_start_apps(&uninstall_publishers)?);
             if let Ok(registered_apps) = discover_registered_app_paths() {
                 items.extend(registered_apps);
             }
@@ -2306,102 +2304,30 @@ fn enumerate_shell_apps() -> Vec<(String, String)> {
     apps
 }
 
-#[cfg(target_os = "windows")]
-fn discover_start_apps_via_powershell(
-    uninstall_publishers: &HashMap<String, String>,
-) -> Result<Vec<SearchItem>, ProviderError> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-Get-StartApps | ForEach-Object {
-  $name = [string]$_.Name
-  $appId = [string]$_.AppID
-  if (-not [string]::IsNullOrWhiteSpace($name) -and -not [string]::IsNullOrWhiteSpace($appId)) {
-    "{0}`t{1}" -f $name.Trim(), $appId.Trim()
-  }
-}
-"#;
-    let mut command = Command::new("powershell.exe");
-    command
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            script,
-        ])
-        .creation_flags(CREATE_NO_WINDOW);
-
-    let output = command
-        .output()
-        .map_err(|error| ProviderError::new(format!("Get-StartApps invocation failed: {error}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(ProviderError::new(format!(
-            "Get-StartApps failed (status={}): {}",
-            output.status,
-            if stderr.is_empty() {
-                "no stderr"
-            } else {
-                stderr.as_str()
-            }
-        )));
-    }
-
-    let mut items = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Some((name, app_id)) = line.split_once('\t') else {
-            continue;
-        };
-
-        let title = name.trim();
-        let app_id = app_id.trim();
-        if title.is_empty() || app_id.is_empty() {
-            continue;
-        }
-        if should_exclude_non_app_start_reference(title, app_id) {
-            continue;
-        }
-        if is_documentation_like_start_entry_title(title) {
-            continue;
-        }
-
-        let path = format!("shell:AppsFolder\\{app_id}");
-        let id = format!("app:{}", normalize_id_path(&path));
-        let mut item = SearchItem::new(&id, "app", title, &path);
-        if let Some(subtitle) = publisher_from_uninstall_map(title, uninstall_publishers)
-            .or_else(|| start_app_subtitle_from_app_id(app_id))
-            .and_then(|raw| sanitize_publisher_label(raw.as_str()))
-        {
-            item = item.with_subtitle(subtitle.as_str());
-        }
-        items.push(item);
-    }
-
-    Ok(items)
-}
-
-/// Start-menu entries, preferring the shell namespace and falling back to
-/// `Get-StartApps` only when the namespace enumerates nothing.
+/// Start-menu entries from the shell's `AppsFolder` namespace.
 ///
-/// The fallback exists so a machine where COM enumeration fails loses speed
-/// rather than 144 app records. It is expected never to run.
+/// An empty enumeration is an error, not an empty app list: the caller treats a
+/// provider error as "keep the previous rows" and skips the prune. Returning an
+/// empty `Ok` would prune every app row on a transient COM failure.
 #[cfg(target_os = "windows")]
 fn discover_start_apps(
     uninstall_publishers: &HashMap<String, String>,
 ) -> Result<Vec<SearchItem>, ProviderError> {
-    let apps = enumerate_shell_apps();
+    discover_start_apps_from(enumerate_shell_apps(), uninstall_publishers)
+}
+
+#[cfg(target_os = "windows")]
+fn discover_start_apps_from(
+    apps: Vec<(String, String)>,
+    uninstall_publishers: &HashMap<String, String>,
+) -> Result<Vec<SearchItem>, ProviderError> {
     if apps.is_empty() {
         crate::logging::warn(
-            "[nex] shell AppsFolder enumeration returned nothing; using the PowerShell fallback",
+            "[nex] shell AppsFolder enumeration returned nothing; keeping previous app rows",
         );
-        return discover_start_apps_via_powershell(uninstall_publishers);
+        return Err(ProviderError::new(
+            "shell AppsFolder enumeration returned nothing",
+        ));
     }
 
     let folder_roots = crate::app_target::known_folder_roots();
@@ -3064,6 +2990,18 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(total, ids.len(), "the namespace returned duplicate App IDs");
+    }
+
+    /// An empty enumeration must be an error, not an empty list: the caller
+    /// treats a provider error as "keep the previous rows" and skips the prune.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_empty_shell_enumeration_keeps_previous_rows() {
+        let result = discover_start_apps_from(Vec::new(), &HashMap::new());
+        assert!(
+            result.is_err(),
+            "an empty enumeration must not look like a valid empty app list"
+        );
     }
 
     /// A subkey that does not exist must read as absent, not as an empty value.

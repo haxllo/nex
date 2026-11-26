@@ -3389,6 +3389,7 @@ fn self_measure_memory() -> usize {
 mod tests {
     use super::CoreService;
     use crate::config::{Config, SearchMode};
+    use crate::discovery::{DiscoveryProvider, ProviderError};
     use crate::index_store::{self, open_memory};
     use crate::model::SearchItem;
     use crate::search::SearchFilter;
@@ -3439,6 +3440,39 @@ mod tests {
         let db = open_memory().expect("memory db");
         let service = CoreService::with_connection(cfg, db).expect("service should initialize");
         (service, cfg_path, db_path)
+    }
+
+    struct FailingAppProvider;
+
+    impl DiscoveryProvider for FailingAppProvider {
+        fn provider_name(&self) -> &'static str {
+            "start-menu-apps"
+        }
+
+        fn discover(&self) -> Result<Vec<SearchItem>, ProviderError> {
+            Err(ProviderError::new("empty enumeration"))
+        }
+    }
+
+    /// A failed app pass must not prune the rows it did not see. The empty
+    /// AppsFolder enumeration now returns an error for exactly this reason: the
+    /// caller aborts before `scan_prune`, so the previous app rows survive.
+    #[test]
+    fn a_failed_app_provider_does_not_prune_existing_app_rows() {
+        let (service, _dir) = isolated_service();
+        let item = SearchItem::new("app:test", "app", "Test App", r"C:\Test\app.exe");
+        index_store::upsert_items(&*service.db(), std::slice::from_ref(&item))
+            .expect("seed the app row");
+        service.replace_providers(vec![Box::new(FailingAppProvider)]);
+
+        let result = service.rebuild_index_internal(false, None);
+
+        assert!(result.is_err(), "the failing provider must abort the pass");
+        let stored = index_store::get_item(&*service.db(), "app:test").expect("read the row");
+        assert!(
+            stored.is_some(),
+            "a failed app pass must not prune the existing app row"
+        );
     }
 
     #[test]

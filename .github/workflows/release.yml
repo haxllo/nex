@@ -75,6 +75,10 @@ jobs:
       # five-minute job a hard dependency of shipping a fix.
       - name: Resolve the release notes
         id: notes
+        # The generator asks the API for each author's handle, so it needs a token
+        # here, not only on the publish step.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $file = "docs/releases/v${env:VERSION}-notes.md"
           if (-not (Test-Path $file)) {

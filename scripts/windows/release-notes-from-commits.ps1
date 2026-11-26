@@ -77,6 +77,11 @@ try {
   # the point of naming them - so it is the one place an @ is left alone. Derived
   # from a GitHub noreply address when the commit uses one, else asked of the API,
   # else the plain name. No exception for the owner: every line names who wrote it.
+  #
+  # In Actions only the step that publishes the release carries GH_TOKEN, so a
+  # step that merely drafts notes has an unauthenticated gh and every lookup fell
+  # back to a plain name. Reuse the job token when it is there.
+  if (-not $env:GH_TOKEN -and $env:GITHUB_TOKEN) { $env:GH_TOKEN = $env:GITHUB_TOKEN }
   $repoSlug = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { (gh repo view --json nameWithOwner -q .nameWithOwner 2>$null) }
   $loginCache = @{}
   function Resolve-GitHubLogin([string]$email, [string]$sha) {

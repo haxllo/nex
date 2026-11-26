@@ -12,8 +12,13 @@
    allowed, no matter how complete the implementation looks.
 3. **Verify, then report.** Use the release profile and `G:\nex-target`, run the
    relevant gate, and never claim a check passed unless it was run.
-4. **Commit identity.** Author is the repo owner; commit bodies contain no
-   AI/bot names or co-author trailers. Do not commit unless asked.
+4. **Commit identity.** Author is the human responsible for the change — the
+   repo owner here, an outside contributor on their own pull request — using
+   their own real address. Never a placeholder like `<your-email@example.com>`:
+   GitHub credits a commit to whoever owns the author email, so a placeholder
+   silently credits a stranger. For the owner's own commits, no bot/AI name as
+   author and no AI/bot trailers in the body; a contributor's commit message is
+   their own business. Do not commit unless asked.
 5. **Process boundaries.** UI (Medium IL) never indexes; indexer (Medium IL)
    never renders; helper (High IL) is a broker, not a supervisor. See
    "Process Model & Privilege Boundaries" below.
@@ -207,10 +212,13 @@ active meanwhile. The snapshot-sync loop respawns a dead indexer.
 
 ## Agent Tooling
 
-- `scripts/git-hooks/commit-msg` enforces the non-negotiables: it strips AI
-  co-author trailers, rejects a commit that changes `apps/`, `scripts/`, or
-  `manifests/` without a `CIQ-<n>` id, and rejects an issue commit made on
-  `master`/`main` (staged changes survive, so the commit is redone on a
+- `scripts/git-hooks/commit-msg` enforces the non-negotiables: it refuses a
+  placeholder or domainless author identity for anyone (GitHub would credit a
+  stranger), and for the owner's own commits it also strips AI trailers and
+  assistant signatures and refuses a bot author. A contributor's identity and
+  message are never rejected. It then rejects a commit that changes `apps/`,
+  `scripts/`, or `manifests/` without a `CIQ-<n>` id, and rejects an issue commit
+  made on `master`/`main` (staged changes survive, so the commit is redone on a
   branch). Enable it per clone with `git config core.hooksPath scripts/git-hooks`.
   Exceptional commits can bypass once via `NEX_ALLOW_NO_LINEAR=1` (no id) or
   `NEX_ALLOW_MASTER_COMMIT=1` (issue commit on master).
@@ -333,15 +341,40 @@ Artifacts land in `artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe}` + ma
 
 ## Git Commit Author
 
-All commits MUST use the repo owner's identity. Never commit with a bot/AI name.
+All commits MUST be attributed to the human who is responsible for the change,
+under their own real email address. In this repo that is the owner; on a
+contributor's pull request it is that contributor. Never a placeholder. For the
+owner's own commits: never a bot/AI name, and the body carries no assistant
+trailer; that part is personal, not a rule imposed on contributors.
 
 ```bash
 git commit --author="Habeeb <mshabeeburrahman786@gmail.com>" -m "message"
 ```
 
+Why the email matters: GitHub credits a commit to the account that owns the
+author *email*, not the name. A commit made as `<your-email@example.com>` — git's
+unconfigured default — is credited to whichever stranger registered that address;
+this repo has exactly one such commit and it put an unrelated person on the
+contributors list. `scripts/git-hooks/commit-msg` refuses placeholder, test and
+domainless addresses for everyone, and prints a note when the author is not the
+owner (an outside contributor is not blocked). The AI-trailer stripping and the
+refusal of a bot *author* apply only in the owner's own clone, keyed off the
+configured identity — a contributor using Claude may keep its trailer.
+`NEX_OWNER_EMAIL` changes whose address counts as the owner's.
+
+An agent working for someone commits under **that person's** identity, not its
+own: the human is accountable for the change, and attribution must point at a
+person. That is not licence to borrow a name — use the address of the person who
+owner the work and can answer for it.
+
 **Note**: Use this identity for any git operation that requires an author (commits, amends, rebases, etc.).
 
 ## Commit Message Content
+
+The rules below are **the owner's, for the owner's own commits**. A contributor's
+commit message is theirs: an outside contributor may commit through an assistant
+and keep whatever trailer that tool appends. Nothing in this section is used to
+reject someone else's commit.
 
 Commit message bodies MUST contain NO AI agent embedded names. This means absolutely NO `Co-authored-by:` trailers referencing any bot or AI, NO bot signatures, NO mentions of AI assistants, and NO references to agent systems. This applies to commit messages, tag messages, branch descriptions, and any other git-related text.
 

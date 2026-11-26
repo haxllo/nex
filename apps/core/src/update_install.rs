@@ -156,6 +156,16 @@ fn components(path: &Path) -> Vec<String> {
 /// The installed runtime inside `root`: the first candidate that exists, or
 /// the canonical path when none does (so callers still name what should be
 /// there).
+/// The UI runtime, which is the one that is started.
+///
+/// [`runtime_executable`] answers "any runtime image", which is the right question
+/// for a version stamp and the wrong one for starting: with `NexUIProcess.exe`
+/// missing it found `NexHelper.exe`, and starting that asks for elevation and
+/// fails. Starting Nex means starting this file or nothing.
+pub fn ui_executable(root: &Path) -> PathBuf {
+    root.join("bin").join("NexUIProcess.exe")
+}
+
 pub fn runtime_executable(root: &Path) -> PathBuf {
     for candidate in RUNTIME_CANDIDATES {
         let path = root.join("bin").join(candidate);

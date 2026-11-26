@@ -39,8 +39,9 @@ disk is dropped. Start-menu app identities come from the shell's `AppsFolder`
 namespace, enumerated as shell items: the App ID is the item's
 `SIGDN_PARENTRELATIVEPARSING` name and the title is its `SIGDN_NORMALDISPLAY`
 name, which is the same list `Get-StartApps` reports. No part of an app pass
-starts PowerShell; `Get-StartApps` remains only as a fallback for the case where
-the namespace enumerates nothing, and is expected never to run.
+starts PowerShell. An empty enumeration is treated as a failed pass, not as an
+empty app list: the provider returns an error, the pass skips its prune, and the
+previous app rows stay until the next successful enumeration.
 
 An AppsFolder entry is also checked against the filesystem before it becomes an
 app row. Uninstalling a program leaves its Start-menu shortcut behind with a dead

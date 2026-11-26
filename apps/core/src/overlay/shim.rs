@@ -476,6 +476,17 @@ impl NativeOverlayShell {
         self.post(UiCommand::ApplyStatus);
     }
 
+    /// The status line as the shell holds it, for tests that assert on what a
+    /// failure reports.
+    #[cfg(test)]
+    pub fn status_text(&self) -> String {
+        self.inner
+            .state
+            .lock()
+            .map(|s| s.status_text.clone())
+            .unwrap_or_default()
+    }
+
     /// Clear the status line only while it still shows `message`, so a
     /// transient hint never wipes a newer, unrelated status.
     pub fn clear_status_text_if(&self, message: &str) {

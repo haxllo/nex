@@ -2,8 +2,7 @@
   [string]$Version,
   [string]$PreviousTag,
   [string]$OutputPath,
-  [string]$Notes,
-  [string]$OwnerEmail
+  [string]$Notes
 )
 
 # Drafts docs/releases/v<ver>-notes.md from the commit log since the previous
@@ -74,11 +73,10 @@ try {
     return ($text -replace '@', "@$([char]0x200B)")
   }
 
-  # Credit for a commit that is not the owner's. A contributor's handle is a real
-  # mention on purpose - that is the point of naming them - so it is the one place
-  # an @ is left alone. Derived from a GitHub noreply address when the commit uses
-  # one, else asked of the API, else the plain name.
-  $owner = if ($OwnerEmail) { $OwnerEmail } elseif ($env:NEX_OWNER_EMAIL) { $env:NEX_OWNER_EMAIL } else { 'mshabeeburrahman786@gmail.com' }
+  # Credit the author of a commit. A handle is a real mention on purpose - that is
+  # the point of naming them - so it is the one place an @ is left alone. Derived
+  # from a GitHub noreply address when the commit uses one, else asked of the API,
+  # else the plain name. No exception for the owner: every line names who wrote it.
   $repoSlug = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { (gh repo view --json nameWithOwner -q .nameWithOwner 2>$null) }
   $loginCache = @{}
   function Resolve-GitHubLogin([string]$email, [string]$sha) {
@@ -138,11 +136,10 @@ try {
       $item = "- $clean"
     }
     $item = ConvertTo-MentionSafe $item
-    # Credit whoever wrote the commit, when it is not the owner. The owner's own
-    # commits are the vast majority and naming them on every line is noise.
+    # Every line names its author, the owner's own commits included.
     $credit = ""
-    if ($authorEmail -and $authorEmail -ne $owner) {
-      $login = Resolve-GitHubLogin $authorEmail $sha
+    if ($authorEmail -or $authorName) {
+      $login = if ($authorEmail) { Resolve-GitHubLogin $authorEmail $sha } else { $null }
       $who = if ($login) { "@$login" } else { ConvertTo-MentionSafe $authorName }
       if ($who) { $credit = " - $who" }
     }

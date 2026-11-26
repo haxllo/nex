@@ -1,17 +1,20 @@
 #!/bin/sh
 # Nex commit policy.
 #
-# 0. Refuse placeholder, test and bot author identities.
-# 1. Strip AI co-author trailers.
+# 0. Refuse placeholder and no-domain author identities.
+# 1. The owner's own commits: no bot identity, no assistant signatures.
 # 2. Require a Linear issue id (CIQ-<n>) when the commit changes code paths.
 # 3. Refuse an issue-tracked commit on master/main: issue work needs a branch.
+#
+# 1 is the owner's personal rule and applies only to the owner's commits. A
+# contributor's message is their own business, and an outside contributor is
+# never blocked for using a tool.
 #
 # Exceptional commits can bypass once with:
 #   NEX_ALLOW_NO_LINEAR=1      git commit ...   (no Linear id)
 #   NEX_ALLOW_MASTER_COMMIT=1  git commit ...   (issue commit on master)
 #
-# An outside contributor is not blocked: their own real address is accepted and
-# reported. NEX_OWNER_EMAIL overrides whose address counts as the owner's.
+# NEX_OWNER_EMAIL overrides whose address counts as the owner's.
 
 msg_file="$1"
 
@@ -54,10 +57,6 @@ case "$author_email" in
     reject_identity "reserved documentation address" ;;
   *@test|*@test.com|*@test.local)
     reject_identity "reserved test address" ;;
-  *'[bot]'@users.noreply.github.com|*@bots.noreply.github.com)
-    reject_identity "bot identity; commits are attributed to a person" ;;
-  *@commandcode.ai)
-    reject_identity "automation identity; commits are attributed to a person" ;;
 esac
 
 # 'dev@nex' is what an unconfigured git hostname produces: no routable domain.
@@ -66,22 +65,64 @@ case "${author_email#*@}" in
   *) reject_identity "address has no domain" ;;
 esac
 
+# Whose commits the personal rules below apply to: the clone's configured
+# identity, not the commit's author. A bot or placeholder --author can never
+# equal the owner's address, so keying on the author silently skipped the rule
+# it was meant to enforce.
+configured_email=$(git config user.email 2>/dev/null || true)
+is_owner=0
+[ "$configured_email" = "$owner_email" ] && is_owner=1
+
+if [ "$is_owner" = "1" ]; then
+  # A tool must not be the author of the owner's work. A contributor committing
+  # through an assistant is their call; this is not.
+  case "$author_email" in
+    *'[bot]'@users.noreply.github.com|*@bots.noreply.github.com|*@commandcode.ai)
+      reject_identity "automation identity; your commits are attributed to you" ;;
+  esac
+fi
+
 if [ "$author_email" != "$owner_email" ]; then
   cat >&2 <<EOF
 commit-msg: note: author is $author_name <$author_email>, not the repo owner
             (<$owner_email>).
-            That is correct for an outside contributor. If it is a placeholder
-            or someone else's account, GitHub will credit the wrong person -
-            fix it before pushing:
+            That is correct for an outside contributor, and the owner's message
+            rules are not applied to you. If this is a placeholder or someone
+            else's account, GitHub will credit the wrong person - fix it before
+            pushing:
               git commit --amend --reset-author
 EOF
 fi
 
-# --- 1. No AI/bot trailers in commit messages -------------------------------
-# The repo owner requires commit bodies to contain no agent names at all.
-sed -i.bak '/^Co-authored-by: Command Code /d' "$msg_file"
-sed -i.bak '/^Co-authored-by: .*noreply@commandcode\.ai/d' "$msg_file"
-rm -f "$msg_file.bak"
+# --- 1. No assistant signatures in the owner's messages ---------------------
+# Owner-only, deliberately. Tools differ in what they append - Command Code
+# writes a trailer, Claude Code writes a trailer plus a "Generated with" line
+# and a robot line - so this matches the class instead of one product. A
+# contributor's message is left exactly as they wrote it; a human co-author is
+# left alone in either case.
+if [ "$is_owner" = "1" ]; then
+  ai_tools='claude|anthropic|copilot|cursor|codex|chatgpt|openai|gpt-[0-9]|gemini|aider|devin|windsurf|continue\.dev|command[ -]?code'
+  before=$(wc -l < "$msg_file")
+  awk -v ai="$ai_tools" '
+    {
+      low = tolower($0)
+      if (low ~ /^(co-authored-by|co-developed-by|signed-off-by|assisted-by):/ && low ~ ai) { next }
+      if (low ~ /generated with/ && low ~ ai) { next }
+      if ($0 ~ /\xEF\xBF\xBD/) { next }
+      print
+    }
+  ' "$msg_file" > "$msg_file.clean"
+  after=$(wc -l < "$msg_file.clean")
+  if [ ! -s "$msg_file.clean" ]; then
+    echo "commit-msg: refusing to empty the commit message while stripping signatures." >&2
+    rm -f "$msg_file.clean"
+    exit 1
+  fi
+  if [ "$after" -lt "$before" ]; then
+    echo "commit-msg: removed $((before - after)) assistant signature line(s) from the commit message" >&2
+  fi
+  mv "$msg_file.clean" "$msg_file"
+fi
 
 # Merge/revert/fixup commits carry their own context; no issue needed.
 subject=$(sed -n '1p' "$msg_file")

@@ -10,9 +10,10 @@ only repeats the rules that must never be skipped.
    build; never claim a check passed unless it was run.
 3. **Commit identity.** Author is the human responsible for the change — the repo
    owner here, an outside contributor on their own PR — under their own real
-   address; never a bot, an AI, or a placeholder like `<your-email@example.com>`,
-   which GitHub credits to whoever registered it. Commit bodies contain no
-   AI/bot names or co-author trailers. Do not commit unless asked.
+   address, never a placeholder like `<your-email@example.com>` (GitHub credits it
+   to whoever registered it). For the owner's own commits, no bot/AI name as author
+   and no AI trailers in the body; a contributor's message is their own business.
+   Do not commit unless asked.
 4. **Process boundaries.** `NexUIProcess.exe` (Medium IL) never indexes,
    `NexIndexerProcess.exe` (Medium IL) never renders, and `NexHelper.exe`
    (High IL) is a broker, not a supervisor.

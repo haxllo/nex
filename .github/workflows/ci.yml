@@ -104,6 +104,13 @@ jobs:
               git show --pretty=format: --name-only HEAD > "$RUNNER_TEMP/changed.txt"
             fi
             REASON_SOURCE="$(git log -1 --pretty=%B)"
+            # A squash merge replaces the PR body with the commit message, so a
+            # bypass reason written in the PR body is lost. Look up the PR that
+            # produced this commit and append its body to the reason source.
+            pr_body="$(gh api "repos/$REPO/commits/${{ github.sha }}/pulls" --jq '.[0].body // empty' 2>/dev/null || true)"
+            if [ -n "$pr_body" ]; then
+              REASON_SOURCE="$REASON_SOURCE"$'\n'"$pr_body"
+            fi
           fi
           echo "changed files:"; cat "$RUNNER_TEMP/changed.txt"
           # Escape hatch, so an agent that has genuinely decided a document is

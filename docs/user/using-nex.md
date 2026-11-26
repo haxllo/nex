@@ -50,6 +50,10 @@ Each row shows an icon, a title, and a subtitle. Applications appear first, then
 files and folders, then actions. Grid view arranges applications as tiles; files,
 folders, and actions always stay as rows.
 
+A row whose program has been uninstalled since the list was built says so ("Spotify
+is no longer installed") rather than opening something else, and disappears on the
+next app pass.
+
 Right-click any row for its actions:
 
 | Action | Available for |

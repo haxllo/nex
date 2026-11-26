@@ -2692,6 +2692,32 @@ impl RuntimeWorker {
                                                 let _ = guard.delete_item_by_path_or_title(&target_title);
                                             }
                                         }
+                                        // The row can outlive the delete when the
+                                        // registry title and the shell title differ,
+                                        // and then it stayed searchable for as long
+                                        // as the next app pass took. Ask for that
+                                        // pass now: the panel is hidden, so the few
+                                        // hundred milliseconds do not show.
+                                        if let Ok(mut service) = self.service.try_write() {
+                                            if let Err(error) = service.invalidate_provider_stamp("start-menu-apps") {
+                                                log_warn(&format!(
+                                                    "[nex] uninstall could not invalidate the app provider stamp: {error}"
+                                                ));
+                                            }
+                                            // The uninstall list is a five-minute cache
+                                            // and it still contains the entry that was
+                                            // just removed.
+                                            crate::uninstall_registry::invalidate_caches();
+                                            match service.rebuild_application_index_with_report() {
+                                                Ok(report) => log_info(&format!(
+                                                    "[nex] uninstall refresh: upserted={} removed={}",
+                                                    report.upserted_total, report.removed_total
+                                                )),
+                                                Err(error) => log_warn(&format!(
+                                                    "[nex] uninstall refresh failed: {error}"
+                                                )),
+                                            }
+                                        }
                                         self.overlay.set_status_text("");
                                         if reset {
                                             reset_overlay_session(

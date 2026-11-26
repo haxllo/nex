@@ -304,6 +304,11 @@ mod windows {
                                 "[nex] app discovery refresh could not invalidate the provider stamp: {error}"
                             ));
                         }
+                        // The same registry keys feed the uninstall list. Without
+                        // this, a program installed minutes ago still looks like it
+                        // has no uninstall entry, and "Uninstall" in the context
+                        // menu fell back to opening Settings instead.
+                        crate::uninstall_registry::invalidate_caches();
                         match service.rebuild_application_index_with_report() {
                             Ok(report) => crate::logging::info(&format!(
                                 "[nex] app discovery refresh: discovered={} upserted={} removed={}",

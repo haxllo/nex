@@ -39,6 +39,11 @@ static REGISTRY_CACHE: OnceLock<Mutex<UninstallCache>> = OnceLock::new();
 #[cfg(all(test, target_os = "windows"))]
 thread_local! {
     static APPX_COLLECTOR_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Full registry walks forced by the context-menu lookup finding nothing.
+    static REFRESH_ON_MISS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Registry walks that actually happened, so a test can tell a cache hit from
+    /// a reload.
+    static CACHE_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub fn search_uninstall_actions(query: &str, limit: usize) -> Vec<SearchItem> {
@@ -66,11 +71,40 @@ pub fn has_uninstall_intent(query: &str) -> bool {
 /// through `search_uninstall_actions`, which only accepts a typed
 /// "uninstall <app>" query and returns nothing for a bare name.
 pub fn search_uninstall_actions_for_title(title: &str, limit: usize) -> Vec<SearchItem> {
-    let entries = match load_cached_entries(false) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
+    let Ok(mut entries) = load_cached_entries(false) else {
+        return Vec::new();
     };
-    title_actions_with_entries(title, limit, &entries)
+    let mut actions = title_actions_with_entries(title, limit, &entries);
+    if actions.is_empty() {
+        // A miss is exactly when a stale cache hurts: a program installed in the
+        // last five minutes has an uninstall entry again, but the cached walk says
+        // it has none, and the context menu fell back to searching Settings for
+        // something it could have removed itself. Three registry walks are cheap
+        // compared with a wrong answer, and this only runs on a miss.
+        #[cfg(all(test, target_os = "windows"))]
+        REFRESH_ON_MISS.with(|calls| calls.set(calls.get() + 1));
+        if let Ok(fresh) = load_cached_entries(true) {
+            entries = fresh;
+            actions = title_actions_with_entries(title, limit, &entries);
+        }
+    }
+    actions
+}
+
+/// Forget both cached registry walks.
+///
+/// The uninstall list is read once and reused for five minutes. That is wrong the
+/// moment a program is installed or removed, and the app watcher already sees
+/// those registry keys change, so it calls this rather than waiting for the TTL.
+pub fn invalidate_caches() {
+    for cache in [UNINSTALL_CACHE.get(), REGISTRY_CACHE.get()]
+        .into_iter()
+        .flatten()
+    {
+        if let Ok(mut state) = cache.lock() {
+            *state = UninstallCache::default();
+        }
+    }
 }
 
 fn title_actions_with_entries(
@@ -409,6 +443,8 @@ fn load_cached_entries(force_refresh: bool) -> Result<Vec<UninstallEntry>, Strin
         .unwrap_or(true);
 
     if force_refresh || stale {
+        #[cfg(all(test, target_os = "windows"))]
+        CACHE_LOADS.with(|loads| loads.set(loads.get() + 1));
         state.entries = load_entries()?;
         state.loaded_at = Some(Instant::now());
     }
@@ -1144,6 +1180,36 @@ fn to_wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    /// A program installed minutes ago has an uninstall entry again, but the
+    /// five-minute cache still says it has none - and the context menu then opened
+    /// Settings instead of offering to remove the program it was asked about.
+    #[test]
+    fn a_miss_reruns_the_registry_walk_once() {
+        super::REFRESH_ON_MISS.with(|calls| calls.set(0));
+        let actions = super::search_uninstall_actions_for_title("zzzz-not-an-installed-app", 5);
+        assert!(actions.is_empty());
+        assert_eq!(
+            super::REFRESH_ON_MISS.with(|calls| calls.get()),
+            1,
+            "a miss must re-read the registry exactly once"
+        );
+    }
+
+    /// The watcher calls this when the Uninstall keys change, so the next lookup
+    /// cannot answer from a list that predates the install.
+    #[test]
+    fn invalidation_forces_the_next_lookup_to_re_read_the_registry() {
+        let _ = super::load_cached_entries(false);
+        super::CACHE_LOADS.with(|loads| loads.set(0));
+        super::invalidate_caches();
+        let _ = super::load_cached_entries(false);
+        assert_eq!(
+            super::CACHE_LOADS.with(|loads| loads.get()),
+            1,
+            "an invalidated cache must reload instead of answering from memory"
+        );
+    }
+
     use super::{
         extract_uninstall_search_term, rewrite_msiexec_install_to_uninstall,
         search_uninstall_actions_with_entries, split_unquoted_path_with_extension,

@@ -63,6 +63,16 @@ try {
   # does not appear in the notes a user reads.
   $skipPattern = '^(Merge |Revert |fixup!|squash!|docs:|chore:|test:)'
 
+  # A commit subject is free text and can contain an "@name" - "call the winget
+  # script explicitly instead of splatting @args" was published as a live
+  # GitHub mention, so a stranger with that username was notified about our
+  # release. The sigil becomes an HTML entity: it renders as "@args" exactly as
+  # written, and the mention parser never sees an account to link or ping.
+  function ConvertTo-MentionSafe([string]$text) {
+    if (-not $text) { return $text }
+    return ($text -replace '@', '&#64;')
+  }
+
   foreach ($line in $commits) {
     if (-not $line) { continue }
     $parts = $line -split "`t", 2
@@ -102,11 +112,12 @@ try {
       # to appear twice.
       $item = "- $clean"
     }
+    $item = ConvertTo-MentionSafe $item
     # `$null -ne` rather than truthiness: an empty List[string] evaluates to
     # $false in PowerShell, so `if ($bucket)` sent every typed commit to the
     # untyped list until each bucket already had an entry.
     if ($null -ne $bucket) { $bucket.Add($item) } else { $untyped.Add($item) }
-    $log.Add("- [``$sha``](https://github.com/haxllo/nex/commit/$sha) $subject")
+    $log.Add("- [``$sha``](https://github.com/haxllo/nex/commit/$sha) $(ConvertTo-MentionSafe $subject)")
   }
 
   $counts = @()

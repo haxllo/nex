@@ -192,6 +192,17 @@ pub fn delete_item(db: &Connection, id: &str) -> Result<(), StoreError> {
 }
 
 /// Delete many ids in one transaction.
+/// Every stored `kind='app'` row as `(id, path)`.
+///
+/// Used to re-check the launch targets of rows already in the index. The app pass
+/// can only prune a row the provider stopped reporting, and the shell keeps
+/// listing an app for several seconds after it is uninstalled.
+pub fn app_item_paths(db: &Connection) -> Result<Vec<(String, String)>, StoreError> {
+    let mut stmt = db.prepare("SELECT id, path FROM item WHERE kind = 'app'")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub fn delete_items(db: &Connection, ids: &[String]) -> Result<(), StoreError> {
     if ids.is_empty() {
         return Ok(());

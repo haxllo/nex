@@ -71,7 +71,10 @@ pub fn has_uninstall_intent(query: &str) -> bool {
 /// through `search_uninstall_actions`, which only accepts a typed
 /// "uninstall <app>" query and returns nothing for a bare name.
 pub fn search_uninstall_actions_for_title(title: &str, limit: usize) -> Vec<SearchItem> {
-    let Ok(mut entries) = load_cached_entries(false) else {
+    // Registry rows only: this runs while the user is looking at a context menu, so
+    // it must not start a child process to collect Appx packages. A Store app has no
+    // uninstall command to run anyway, which is why the caller falls back to Settings.
+    let Ok(mut entries) = load_registry_entries_cached_with(false) else {
         return Vec::new();
     };
     let mut actions = title_actions_with_entries(title, limit, &entries);
@@ -83,7 +86,7 @@ pub fn search_uninstall_actions_for_title(title: &str, limit: usize) -> Vec<Sear
         // compared with a wrong answer, and this only runs on a miss.
         #[cfg(all(test, target_os = "windows"))]
         REFRESH_ON_MISS.with(|calls| calls.set(calls.get() + 1));
-        if let Ok(fresh) = load_cached_entries(true) {
+        if let Ok(fresh) = load_registry_entries_cached_with(true) {
             entries = fresh;
             actions = title_actions_with_entries(title, limit, &entries);
         }
@@ -468,6 +471,15 @@ fn load_registry_entries() -> Result<Vec<UninstallEntry>, String> {
 }
 
 fn load_registry_entries_cached() -> Result<Vec<UninstallEntry>, String> {
+    load_registry_entries_cached_with(false)
+}
+
+/// The registry-only view, optionally forced.
+///
+/// The context menu uses this rather than [`load_cached_entries`] because that one
+/// also collects Appx rows, and collecting those starts a child process: a stale
+/// lookup then took a second or two before the confirmation could be drawn.
+fn load_registry_entries_cached_with(force_refresh: bool) -> Result<Vec<UninstallEntry>, String> {
     let cache = REGISTRY_CACHE.get_or_init(|| Mutex::new(UninstallCache::default()));
     let mut state = cache
         .lock()
@@ -476,7 +488,7 @@ fn load_registry_entries_cached() -> Result<Vec<UninstallEntry>, String> {
         .loaded_at
         .map(|loaded| loaded.elapsed() >= UNINSTALL_CACHE_TTL)
         .unwrap_or(true);
-    if stale {
+    if force_refresh || stale {
         state.entries = load_registry_entries()?;
         state.loaded_at = Some(Instant::now());
     }
@@ -1192,6 +1204,27 @@ mod tests {
             super::REFRESH_ON_MISS.with(|calls| calls.get()),
             1,
             "a miss must re-read the registry exactly once"
+        );
+    }
+
+    /// The context menu runs this while the user is waiting for the confirmation
+    /// row, so it must not collect Appx packages: that collection starts
+    /// `powershell.exe`, and a stale lookup spent a second or two on it before the
+    /// row could be drawn.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_context_menu_lookup_never_starts_a_child_process() {
+        super::invalidate_caches();
+        super::APPX_COLLECTOR_CALLS.with(|calls| calls.set(0));
+
+        // The first call misses and takes the forced-refresh path.
+        assert!(super::search_uninstall_actions_for_title("zzzz-not-installed", 5).is_empty());
+        let _ = super::search_uninstall_actions_for_title("Spotify", 5);
+
+        assert_eq!(
+            super::APPX_COLLECTOR_CALLS.with(|calls| calls.get()),
+            0,
+            "the context menu must never collect Appx packages"
         );
     }
 

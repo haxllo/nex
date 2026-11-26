@@ -390,6 +390,7 @@ pub(crate) fn run_windows_runtime(
         current_results: Vec::new(),
         current_rows: Vec::new(),
         suppressed_uninstall_titles: Vec::new(),
+        pending_confirmation_shown_at: None,
         pending_confirmation: None,
         selected_index: 0,
         last_query: String::new(),
@@ -612,6 +613,8 @@ struct RuntimeWorker {
     current_results: Vec<crate::model::SearchItem>,
     current_rows: Vec<crate::overlay::OverlayRow>,
     suppressed_uninstall_titles: Vec<String>,
+    /// When the uninstall confirmation view was put up, for the latency line.
+    pending_confirmation_shown_at: Option<std::time::Instant>,
     pending_confirmation: Option<PendingConfirmation>,
     selected_index: usize,
     last_query: String,
@@ -1496,6 +1499,7 @@ impl RuntimeWorker {
                 }
             }
             "uninstall" => {
+                let started = std::time::Instant::now();
                 if _title.is_empty() { return; }
                 let items = crate::uninstall_registry::search_uninstall_actions_for_title(_title, 5);
                 if let Some(item) = items.first() {
@@ -1525,6 +1529,11 @@ impl RuntimeWorker {
                     self.current_rows = overlay_rows(&self.current_results, true);
                     self.overlay.set_results(&self.current_rows, self.selected_index);
                     self.overlay.set_status_text("");
+                    self.pending_confirmation_shown_at = Some(std::time::Instant::now());
+                    log_info(&format!(
+                        "[nex] uninstall confirm shown in {}ms",
+                        started.elapsed().as_millis()
+                    ));
                     return;
                 } else {
                     // No uninstall command for this row. The user still asked
@@ -2665,6 +2674,12 @@ impl RuntimeWorker {
                         let Some(pending) = self.pending_confirmation.take() else {
                             return;
                         };
+                        if let Some(shown_at) = self.pending_confirmation_shown_at.take() {
+                            log_info(&format!(
+                                "[nex] uninstall confirm accepted after {}ms",
+                                shown_at.elapsed().as_millis()
+                            ));
+                        }
                         match pending.kind {
                             ConfirmationKind::Uninstall => {
                                 let Some(uninstall_action) = pending.uninstall_action.as_ref() else {
@@ -2827,6 +2842,12 @@ impl RuntimeWorker {
                         let Some(pending) = self.pending_confirmation.take() else {
                             return;
                         };
+                        if let Some(shown_at) = self.pending_confirmation_shown_at.take() {
+                            log_info(&format!(
+                                "[nex] uninstall confirm cancelled after {}ms",
+                                shown_at.elapsed().as_millis()
+                            ));
+                        }
                         self.current_results = pending.previous_results;
                         self.selected_index = pending
                             .previous_selected_index

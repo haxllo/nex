@@ -1,4 +1,4 @@
-<!-- release: 3.4.0 -->
+<!-- release: 3.4.1 -->
 <!--
   WHAT THIS FILE IS
   The page people see inside Nex, in the What's New view, after they update.
@@ -152,27 +152,19 @@
 
 -->
 
-## Updates and app rows
+## A frosted panel to choose
 
-Most of what changed here happens in the moments after you install or remove something. The rest is small, and you will only notice it when it is not there.
+Liquid Glass bends what is behind the panel. Acrylic skips the bending and frosts it instead, so your wallpaper shows through as one even blur. It is the look the Windows taskbar has when its transparency is on.
 
-### Updating
+Pick it in Settings, under Appearance, next to Liquid Glass.
 
-- **An update no longer leaves Nex stopped.** If the installer cannot replace the files, Nex puts the previous install back and starts it, instead of quitting and leaving you without it.
-- **The updater is now part of Nex** rather than a script it launched. It also gives up on an installer that hangs instead of waiting forever.
-- **A failed update check says so.** It used to report "up to date" whether or not it had reached the server.
+### Acrylic
 
-### Apps
+- **Even frost.** The wallpaper behind the panel is blurred by the same amount everywhere, with no bend at the edges and no colour split.
+- **The same corners as Liquid Glass.** Switching between the two does not move the panel's outline.
+- **A plain border.** One line around the whole panel, in place of the lit bevel glass wears.
 
-- **A newly installed program appears without restarting Nex.**
-- **A program you uninstalled stops appearing** once it is gone from disk, and a Quick Launch pin whose target is missing is hidden until it comes back.
-- **Right-click Uninstall names the program it matched** before anything runs.
-- **A Microsoft Store app opens Installed apps**, where Windows can show its own progress, instead of a silent command with nothing on screen.
-- **A one-letter search keeps its apps.** Some letters showed a single app while the files listed normally.
+### Fixes
 
-### Search and startup
-
-- **The first keystroke is faster**, and the panel no longer opens slowly after an idle period.
-- **A launch that fails now says so** instead of doing nothing.
-- **A folder you cannot open yet is remembered**, instead of being ignored until Nex restarts.
-- **The panel opens in compact view**, with grid view off; both are still in Settings.
+- **A launch that fails says so.** The panel used to close and leave its message on a window you could not see; it comes back with the reason instead.
+- **Copying a path, opening a file's folder, and "Run as administrator"** report their failures the same way.

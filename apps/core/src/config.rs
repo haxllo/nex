@@ -60,7 +60,7 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "file_discovery_backend",
 ];
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchMode {
     #[default]
@@ -250,7 +250,7 @@ mod discovery_backend_tests {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchProvider {
     Duckduckgo,
@@ -378,7 +378,7 @@ impl Default for QuickLaunchConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelBackground {
     /// Live refraction over the captured desktop.
@@ -420,7 +420,7 @@ impl PanelBackground {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewMode {
     /// 60px search bar when idle; the results view appears once you type.
@@ -452,10 +452,63 @@ impl ViewMode {
     }
 }
 
+/// Read a user-editable enum value without refusing the whole file.
+///
+/// The value can come from a build newer than this one (a panel background it has
+/// since added), from a hand edit, or from an option that was renamed. serde's
+/// derived deserializer fails the entire document for that one string, and
+/// `config::load` hands the failure up to a process that exits with one log line
+/// and no window: the user sees Nex refuse to launch and has no way to undo a
+/// setting they cannot reach. An unknown value falls back to the field's default
+/// and says so instead.
+fn lenient_enum<'de, D, T>(
+    deserializer: D,
+    field: &'static str,
+    parse: fn(&str) -> Option<T>,
+) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(match parse(&raw) {
+        Some(value) => value,
+        None => {
+            crate::logging::warn(&format!(
+                "[nex] config: {field} = {raw:?} is not a value this build knows; using the default"
+            ));
+            T::default()
+        }
+    })
+}
+
+impl<'de> Deserialize<'de> for SearchMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        lenient_enum(deserializer, "search_mode", Self::parse)
+    }
+}
+
+impl<'de> Deserialize<'de> for PanelBackground {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        lenient_enum(deserializer, "panel_background", Self::parse)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebSearchProvider {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        lenient_enum(deserializer, "web_search_provider", Self::parse)
+    }
+}
+
+impl<'de> Deserialize<'de> for ViewMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        lenient_enum(deserializer, "view_mode", Self::parse)
+    }
+}
+
 #[cfg(test)]
 mod view_mode_tests {
     use super::*;
-
     #[test]
     fn parses_and_defaults_to_compact() {
         assert_eq!(ViewMode::parse("Compact"), Some(ViewMode::Compact));
@@ -775,6 +828,43 @@ fn is_toml_path(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("toml"))
         .unwrap_or(false)
+}
+
+/// Load the config for a session start, and never let an unreadable file end the
+/// process.
+///
+/// A config that cannot be parsed or validated is kept beside the original as
+/// `config.toml.invalid` and the session runs on defaults. Starting on defaults is
+/// recoverable, and the panel is reachable; exiting is not, because the only trace
+/// is a log line nobody reads while the app appears to refuse to launch. The user
+/// can copy the quarantined file back once whatever it got wrong is fixed.
+pub fn load_for_startup(path: Option<&Path>) -> Config {
+    let resolved = path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(stable_config_path);
+    match load(path) {
+        Ok(config) => config,
+        Err(error) => {
+            let fate = match quarantine_unreadable(&resolved) {
+                Some(aside) => format!("kept as {} and ", aside.display()),
+                None => String::new(),
+            };
+            crate::logging::warn(&format!(
+                "[nex] config could not be read ({error}); {fate}starting with default settings"
+            ));
+            default_for_path(&resolved)
+        }
+    }
+}
+
+/// Move an unreadable config out of the way so the session can write a fresh one
+/// and the original is still there to repair. Returns where it went.
+fn quarantine_unreadable(path: &Path) -> Option<PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+    let aside = path.with_file_name(format!("{}.invalid", CONFIG_FILE_NAME));
+    std::fs::rename(path, &aside).ok().map(|_| aside)
 }
 
 pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
@@ -2074,5 +2164,90 @@ mod discovery_settings_changed_tests {
         let mut next = previous.clone();
         next.discovery_max_depth += 1;
         assert!(discovery_settings_changed(&previous, &next));
+    }
+}
+
+#[cfg(test)]
+mod unreadable_config_tests {
+    use super::*;
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nex-config-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// A value written by a newer build than this one used to fail the whole file,
+    /// which took the process down with it: the 3.4.0 binary met
+    /// `panel_background = "acrylic"` and never showed a window.
+    #[test]
+    fn a_value_this_build_does_not_know_keeps_the_rest_of_the_file() {
+        let raw = concat!(
+            "version = 13\n",
+            "panel_background = \"liquid_metal\"\n",
+            "view_mode = \"carousel\"\n",
+            "search_mode = \"telepathy\"\n",
+            "web_search_provider = \"askjeeves\"\n",
+            "max_results = 42\n",
+        );
+        let (config, _format) =
+            parse_text_with_format(raw).expect("one unknown value must not fail the file");
+
+        // Each unknown value falls back to its own default, and nothing else moves.
+        assert_eq!(config.panel_background, PanelBackground::default());
+        assert_eq!(config.view_mode, ViewMode::default());
+        assert_eq!(config.search_mode_default, SearchMode::default());
+        assert_eq!(config.web_search_provider, WebSearchProvider::default());
+        assert_eq!(config.max_results, 42);
+    }
+
+    #[test]
+    fn known_values_still_read_exactly() {
+        let raw = "version = 13\npanel_background = \"Acrylic\"\nview_mode = \"expanded\"\n";
+        let (config, _format) = parse_text_with_format(raw).expect("known values parse");
+        assert_eq!(config.panel_background, PanelBackground::Acrylic);
+        assert_eq!(config.view_mode, ViewMode::Expanded);
+    }
+
+    /// A file that cannot be parsed at all must not end the session: it is kept
+    /// beside the original and Nex starts on defaults, where the settings UI can
+    /// still be reached.
+    #[test]
+    fn an_unreadable_config_is_kept_aside_and_the_session_starts_on_defaults() {
+        let dir = scratch_dir("recover");
+        let path = dir.join(CONFIG_FILE_NAME);
+        std::fs::write(&path, "panel_background = \"unterminated\n").expect("write broken config");
+
+        let config = load_for_startup(Some(&path));
+
+        assert_eq!(config.panel_background, PanelBackground::Glass);
+        assert!(!path.exists(), "the unreadable file should move aside");
+        assert!(
+            dir.join("config.toml.invalid").exists(),
+            "the original must be kept for repair"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_readable_config_is_loaded_as_written() {
+        let dir = scratch_dir("readable");
+        let path = dir.join(CONFIG_FILE_NAME);
+        let mut expected = default_for_path(&path);
+        expected.panel_background = PanelBackground::White;
+        expected.max_results = 7;
+        let encoded = toml::to_string_pretty(&expected).expect("encode");
+        std::fs::write(&path, encoded).expect("write config");
+
+        let config = load_for_startup(Some(&path));
+
+        assert_eq!(config.panel_background, PanelBackground::White);
+        assert_eq!(config.max_results, 7);
+        assert!(!dir.join("config.toml.invalid").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

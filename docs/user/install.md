@@ -37,6 +37,7 @@ uninstaller.
 | Path | Contents |
 |---|---|
 | `%APPDATA%\Nex\config.toml` | Your settings. Created on first launch. |
+| `%APPDATA%\Nex\config.toml.invalid` | A config Nex could not read, kept for repair. Nex starts on default settings while this exists; see [Settings](settings.md#when-a-value-is-wrong). |
 | `%APPDATA%\Nex\index.sqlite3` | The search index. Safe to delete while Nex is closed; it is rebuilt. |
 | `%APPDATA%\Nex\state.json` | Small runtime state, such as which release's What's New you have seen. |
 | `%APPDATA%\Nex\icon-cache\` | Extracted application icons. Safe to delete. |

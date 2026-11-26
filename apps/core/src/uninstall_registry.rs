@@ -7,6 +7,22 @@ use std::time::{Duration, Instant};
 pub const ACTION_UNINSTALL_PREFIX: &str = "__nex_action_uninstall__:";
 const UNINSTALL_CACHE_TTL: Duration = Duration::from_secs(300);
 
+/// Where an entry comes from, which decides how it is removed.
+///
+/// A package has no uninstall command worth running: Windows removes it through
+/// Installed apps, which shows its own progress and errors. Running
+/// `Remove-AppxPackage` from here instead was a hidden, untimed child process with
+/// no result - the shape antivirus flags and the user never sees.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum UninstallSource {
+    #[default]
+    Registry,
+    Package,
+}
+
+/// Where Windows removes a packaged app, and where Nex sends the user.
+pub(crate) const SETTINGS_INSTALLED_APPS: &str = "ms-settings:appsfeatures";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UninstallEntry {
     token: String,
@@ -16,6 +32,7 @@ struct UninstallEntry {
     fallback_uninstall_command: Option<String>,
     display_icon: String,
     install_location: String,
+    source: UninstallSource,
 }
 
 #[derive(Debug, Default)]
@@ -368,7 +385,9 @@ fn compare_display_name(left: &UninstallEntry, right: &UninstallEntry) -> Orderi
 
 fn uninstall_entry_to_action(entry: &UninstallEntry) -> SearchItem {
     let id = format!("{ACTION_UNINSTALL_PREFIX}{}", entry.token);
-    let subtitle = if entry.publisher.trim().is_empty() {
+    let subtitle = if entry.source == UninstallSource::Package {
+        "Microsoft Store app - opens Installed apps".to_string()
+    } else if entry.publisher.trim().is_empty() {
         "Installed application".to_string()
     } else {
         format!("{} application", entry.publisher.trim())
@@ -509,6 +528,14 @@ fn load_entries() -> Result<Vec<UninstallEntry>, String> {
 
 #[cfg(target_os = "windows")]
 fn execute_entry(entry: &UninstallEntry) -> Result<(), String> {
+    if entry.source == UninstallSource::Package {
+        crate::logging::info(&format!(
+            "[nex] uninstall '{}' is a packaged app; opening Installed apps",
+            entry.display_name
+        ));
+        return crate::action_executor::launch_open_target(SETTINGS_INSTALLED_APPS)
+            .map_err(|error| format!("could not open installed apps: {error}"));
+    }
     match launch_uninstall_command(
         entry.display_name.as_str(),
         entry.uninstall_command.as_str(),
@@ -725,12 +752,11 @@ fn collect_appx_packages(out: &mut Vec<UninstallEntry>) -> Result<(), String> {
             token: format!("appx:{full_name}"),
             display_name: name,
             publisher: String::new(),
-            uninstall_command: format!(
-                "powershell -NoProfile -NonInteractive -Command \"Remove-AppxPackage -Package '{full_name}'\""
-            ),
+            uninstall_command: SETTINGS_INSTALLED_APPS.to_string(),
             fallback_uninstall_command: None,
             display_icon: String::new(),
             install_location: String::new(),
+            source: UninstallSource::Package,
         });
     }
     Ok(())
@@ -813,6 +839,7 @@ fn read_uninstall_entry(
         fallback_uninstall_command,
         display_icon,
         install_location,
+        source: UninstallSource::Registry,
     }))
 }
 
@@ -925,7 +952,12 @@ fn dedupe_uninstall_candidates(
     uninstall: Option<String>,
 ) -> Vec<String> {
     let mut out = Vec::new();
-    for candidate in [quiet_uninstall, uninstall].into_iter().flatten() {
+    // The interactive string comes first on purpose. `QuietUninstallString` is a
+    // silent command with no window and no way to answer a question the uninstaller
+    // needs to ask - HandBrake's "remove components too?" never appeared, and the
+    // user watched a program disappear without being told what happened. The quiet
+    // string stays as the fallback for entries that have nothing else.
+    for candidate in [uninstall, quiet_uninstall].into_iter().flatten() {
         let trimmed = candidate.trim();
         if trimmed.is_empty() {
             continue;
@@ -1207,6 +1239,57 @@ mod tests {
         );
     }
 
+    /// A Store app has no uninstall command worth running: the old row ran a hidden,
+    /// untimed `Remove-AppxPackage` whose result nobody saw. It now opens Installed
+    /// apps, which shows its own progress and errors, and says so in the subtitle.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_appx_entry_opens_installed_apps_instead_of_running_a_command() {
+        let entry = UninstallEntry {
+            token: "appx:Spotify_1.0_x64__abc".to_string(),
+            display_name: "Spotify".to_string(),
+            publisher: String::new(),
+            uninstall_command: SETTINGS_INSTALLED_APPS.to_string(),
+            fallback_uninstall_command: None,
+            display_icon: String::new(),
+            install_location: String::new(),
+            source: UninstallSource::Package,
+        };
+
+        let action = uninstall_entry_to_action(&entry);
+        assert!(
+            action.path.contains("Installed apps"),
+            "the row has to say what it will do, got {:?}",
+            action.path
+        );
+
+        crate::action_executor::take_test_launches();
+        execute_entry(&entry).expect("routing a package must not fail");
+        let launches = crate::action_executor::take_test_launches();
+        assert_eq!(
+            launches,
+            vec![SETTINGS_INSTALLED_APPS.to_string()],
+            "a package must open Installed apps and nothing else"
+        );
+    }
+
+    /// `QuietUninstallString` is silent by design, so an uninstaller that needs to
+    /// ask a question never gets to: HandBrake's "remove components too?" never
+    /// appeared. The vendor's interactive string comes first, quiet is the fallback.
+    #[test]
+    fn the_interactive_uninstaller_is_preferred_over_the_quiet_one() {
+        let ordered = dedupe_uninstall_candidates(
+            Some("quiet-uninstaller.exe /S".to_string()),
+            Some("uninstaller.exe".to_string()),
+        );
+        assert_eq!(ordered.first().map(String::as_str), Some("uninstaller.exe"));
+        assert_eq!(ordered.get(1).map(String::as_str), Some("quiet-uninstaller.exe /S"));
+
+        // An entry with only the quiet string still works.
+        let quiet_only = dedupe_uninstall_candidates(Some("only-quiet.exe /S".to_string()), None);
+        assert_eq!(quiet_only, vec!["only-quiet.exe /S".to_string()]);
+    }
+
     /// The context menu runs this while the user is waiting for the confirmation
     /// row, so it must not collect Appx packages: that collection starts
     /// `powershell.exe`, and a stale lookup spent a second or two on it before the
@@ -1245,8 +1328,9 @@ mod tests {
 
     use super::{
         extract_uninstall_search_term, rewrite_msiexec_install_to_uninstall,
-        search_uninstall_actions_with_entries, split_unquoted_path_with_extension,
-        title_actions_with_entries, UninstallEntry,
+        dedupe_uninstall_candidates, execute_entry, search_uninstall_actions_with_entries,
+        split_unquoted_path_with_extension, title_actions_with_entries, uninstall_entry_to_action,
+        UninstallEntry, UninstallSource, SETTINGS_INSTALLED_APPS,
     };
 
     fn spotify_entry() -> UninstallEntry {
@@ -1258,6 +1342,7 @@ mod tests {
             fallback_uninstall_command: None,
             display_icon: String::new(),
             install_location: String::new(),
+            source: UninstallSource::Registry,
         }
     }
 
@@ -1343,6 +1428,7 @@ mod tests {
                 fallback_uninstall_command: None,
                 display_icon: String::new(),
                 install_location: String::new(),
+                source: UninstallSource::Registry,
             },
             UninstallEntry {
                 token: "2".to_string(),
@@ -1352,6 +1438,7 @@ mod tests {
                 fallback_uninstall_command: None,
                 display_icon: String::new(),
                 install_location: String::new(),
+                source: UninstallSource::Registry,
             },
             UninstallEntry {
                 token: "3".to_string(),
@@ -1361,6 +1448,7 @@ mod tests {
                 fallback_uninstall_command: None,
                 display_icon: String::new(),
                 install_location: String::new(),
+                source: UninstallSource::Registry,
             },
         ];
 

@@ -95,16 +95,33 @@ pub(crate) fn run_windows_runtime(
     // is what made startup feel slow. Quick Launch reads SQLite directly and is unaffected.
     {
         let service = Arc::clone(&service);
+        let scheduled_at = Instant::now();
         let _ = std::thread::Builder::new()
             .name("nex-store-load".into())
-            .spawn(move || match service.read() {
-                Ok(guard) => match guard.reload_cache_from_store() {
-                    Ok(count) => log_info(&format!("[nex] startup cache loaded items={count}")),
-                    Err(error) => {
-                        log_warn(&format!("[nex] startup cache load failed: {error}"));
+            .spawn(move || {
+                // Where the first search's 1.7 s went: this thread is spawned before
+                // the panel is armed, so either it starts late or it waits for a
+                // lock. The two numbers separate those, and both are cheap.
+                log_info(&format!(
+                    "[nex] store load: thread up after {}ms",
+                    scheduled_at.elapsed().as_millis()
+                ));
+                let lock_started = Instant::now();
+                match service.read() {
+                    Ok(guard) => {
+                        log_info(&format!(
+                            "[nex] store load: service lock after {}ms",
+                            lock_started.elapsed().as_millis()
+                        ));
+                        match guard.reload_cache_from_store() {
+                            Ok(count) => log_info(&format!("[nex] startup cache loaded items={count}")),
+                            Err(error) => {
+                                log_warn(&format!("[nex] startup cache load failed: {error}"));
+                            }
+                        }
                     }
-                },
-                Err(_) => log_warn("[nex] startup cache load skipped (service lock poisoned)"),
+                    Err(_) => log_warn("[nex] startup cache load skipped (service lock poisoned)"),
+                }
             });
     }
 

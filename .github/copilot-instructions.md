@@ -3,10 +3,12 @@
 Read `AGENTS.md` first; it is authoritative. The rules that must not be
 skipped:
 
-1. **Linear first.** For any bug report, feature request, or implementation
-   task, search the Nex Linear project (P-CIQ-2) for a matching issue before
-   editing code. Reuse it or create one, then keep it current. Questions,
-   planning, and status requests do not need an issue.
+1. **Find the existing issue first.** For any bug report, feature request, or
+   implementation task, follow "Finding the issue you are about to fix" in
+   AGENTS.md before editing code: the backlink comment on a GitHub issue names its
+   Linear id, and a search needs several wordings before you may conclude nothing
+   matches. Reuse or widen what you find; never open a near-duplicate. Outside
+   contributors record work in GitHub issues and are not asked for a Linear id.
 2. **Verify, then report.** Build release with
    `CARGO_TARGET_DIR=G:\nex-target` and run the relevant gate. Never claim a
    check passed unless it was run.

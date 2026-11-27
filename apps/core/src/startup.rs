@@ -33,6 +33,71 @@ const UNINSTALL_SUBKEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}_is1";
 #[cfg(target_os = "windows")]
 const VALUE_NAME: &str = "Nex";
+
+/// Windows keeps an enabled/disabled flag beside every Run entry, and the login
+/// shell honours it over the presence of the Run value itself. Nex used to touch
+/// only the Run value, so switching launch-at-startup off and on again restored the
+/// value while the flag still said "disabled" and the login skipped it.
+#[cfg(target_os = "windows")]
+const STARTUP_APPROVED_SUBKEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+
+/// The 12-byte blob Task Manager writes for a Run entry: first byte 0x02 enabled,
+/// 0x03 disabled, the rest a timestamp it tolerates as zero.
+pub(crate) fn startup_approved_bytes(enabled: bool) -> [u8; 12] {
+    let mut bytes = [0u8; 12];
+    bytes[0] = if enabled { 0x02 } else { 0x03 };
+    bytes
+}
+
+/// Keep the flag in step with the Run value. Best effort: a machine that refuses
+/// the write still gets the Run value, which is what older builds relied on.
+#[cfg(target_os = "windows")]
+fn set_startup_approved(enabled: bool) {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_BINARY,
+    };
+
+    let subkey = to_wide(STARTUP_APPROVED_SUBKEY);
+    let value_name = to_wide(VALUE_NAME);
+    let blob = startup_approved_bytes(enabled);
+    let mut key = std::ptr::null_mut();
+    let status = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return;
+    }
+    let status = unsafe {
+        RegSetValueExW(
+            key,
+            value_name.as_ptr(),
+            0,
+            REG_BINARY,
+            blob.as_ptr(),
+            blob.len() as u32,
+        )
+    };
+    unsafe {
+        RegCloseKey(key);
+    }
+    if status != ERROR_SUCCESS {
+        crate::logging::warn(&format!(
+            "[nex] startup_approved write failed status={status}; Windows may still skip Nex at login"
+        ));
+    }
+}
 #[cfg(target_os = "windows")]
 const LEGACY_VALUE_NAME: &str = "SwiftFind";
 const STARTUP_ARG: &str = "--background";
@@ -181,6 +246,7 @@ pub fn set_enabled(enabled: bool, executable_path: &Path) -> Result<(), StartupE
         if status != ERROR_SUCCESS {
             return Err(registry_error("set run value", status));
         }
+        set_startup_approved(true);
         return Ok(());
     }
 
@@ -209,6 +275,7 @@ pub fn set_enabled(enabled: bool, executable_path: &Path) -> Result<(), StartupE
     if (status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND)
         && (legacy_status == ERROR_SUCCESS || legacy_status == ERROR_FILE_NOT_FOUND)
     {
+        set_startup_approved(false);
         return Ok(());
     }
     if status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND {
@@ -313,4 +380,20 @@ fn to_wide(value: &str) -> Vec<u16> {
 #[cfg(target_os = "windows")]
 fn registry_error(action: &str, status: u32) -> StartupError {
     StartupError::Command(format!("{action} failed with code {status}"))
+}
+
+#[cfg(test)]
+mod startup_approved_tests {
+    use super::*;
+
+    /// Windows reads the first byte and ignores the rest; getting it backwards is
+    /// what kept a re-enabled Nex from starting at login.
+    #[test]
+    fn startup_approved_bytes_marks_enabled() {
+        assert_eq!(startup_approved_bytes(true)[0], 0x02);
+        assert_eq!(startup_approved_bytes(false)[0], 0x03);
+        assert_eq!(startup_approved_bytes(true).len(), 12);
+        // Only the first byte carries the state.
+        assert!(startup_approved_bytes(true)[1..].iter().all(|byte| *byte == 0));
+    }
 }

@@ -11,7 +11,7 @@
 # docs/whats-new.md, written by hand, and apps/core/src/whats_new.rs asserts it
 # carries no commit log - the two documents are not interchangeable.
 #
-# Shape: a title and a one-line count, then Features / Bug Fixes / Performance for
+# Shape: a one-line count, then Features / Bug Fixes / Performance for
 # subjects that carry a feat:, fix: or perf: prefix, then the commit log, open,
 # which is the complete list and the only view naming each author. Untyped subjects
 # get no section of their own.
@@ -166,8 +166,8 @@ try {
   $summary = if ($counts.Count) { ($counts -join ", ") } else { "$($log.Count) changes" }
 
   $out = New-Object System.Collections.Generic.List[string]
-  $out.Add("## What's new in v$Version")
-  $out.Add("")
+  # No title line. GitHub prints the release name above the body already, so a
+  # heading repeating the version is a second heading for one page.
   $out.Add("Changes since $PreviousTag — $summary.")
   $out.Add("")
   if ($features.Count) {

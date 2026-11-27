@@ -35,7 +35,8 @@ The two documents are not interchangeable:
 
 ### Shape of a drafted release page
 
-A title and a one-line count, then `### Features`, `### Bug Fixes` and
+A one-line count (no title line — GitHub prints the release name above the body),
+then `### Features`, `### Bug Fixes` and
 `### Performance` for commits whose subject starts with `feat:`, `fix:` or `perf:`,
 then `## Commit Log`. The log is open, not folded, because unprefixed commits get no
 section of their own and the log is the complete list — and the only view that names

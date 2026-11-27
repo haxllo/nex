@@ -297,9 +297,14 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
-  // The choice is read here because this is the last moment the user can make it.
+  // Setup: the choice is read here because this is the last moment the user can
+  // make it.
   if CurPageID = wpFinished then
     LaunchAfterInstall := LaunchCheck.Checked;
+  // Uninstaller: the welcome page asks once, and reading it here keeps the answer
+  // before the wizard form and its controls are torn down.
+  if Assigned(DeleteDataCheckbox) then
+    DeleteUserDataAfterUninstall := DeleteDataCheckbox.Checked;
 end;
 
 procedure DeinitializeSetup();
@@ -812,15 +817,6 @@ begin
   DeleteDataCheckbox.Height := ScaleY(17);
   DeleteDataCheckbox.Caption := 'Also delete my settings and search index';
   DeleteDataCheckbox.Checked := false;
-end;
-
-function NextButtonClick(CurPageID: Integer): Boolean;
-begin
-  Result := True;
-  // The uninstaller asks once, on its welcome page. Reading the box here keeps the
-  // answer before the wizard form and its controls are torn down.
-  if Assigned(DeleteDataCheckbox) then
-    DeleteUserDataAfterUninstall := DeleteDataCheckbox.Checked;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

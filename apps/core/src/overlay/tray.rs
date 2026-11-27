@@ -333,11 +333,13 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
     } else {
         "Game Mode: Off"
     });
-    let lock_text = to_wide("Lock");
-    let sleep_text = to_wide("Sleep");
-    let shutdown_text = to_wide("Shutdown");
-    let restart_text = to_wide("Restart");
-    let sign_out_text = to_wide("Sign Out");
+    let lock_text = to_wide("Lock screen");
+    let sleep_text = to_wide("Sleep PC");
+    // "PC" in the label, because bare "Shutdown"/"Restart" next to an app icon
+    // read as "restart Nex" - and this one ends the Windows session.
+    let shutdown_text = to_wide("Shut down PC");
+    let restart_text = to_wide("Restart PC");
+    let sign_out_text = to_wide("Sign out");
     let quit_text = to_wide("Quit");
 
     unsafe {

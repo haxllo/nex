@@ -256,7 +256,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
     // A config this build cannot read must not end the session: the panel is the
     // only way to fix settings, and a process that exits before showing it leaves
     // the user with nothing but a log line.
-    let runtime_config = config::load_for_startup(None);
+    let (runtime_config, startup_notice) = config::load_for_startup(None);
     // Seed the WebView background before any WebView environment exists:
     // Chromium picks subpixel (ClearType) vs grayscale text at surface
     // creation and ignores later runtime switches (verified with a
@@ -304,7 +304,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
     let service = CoreService::new_ui_client_lazy(runtime_config.clone())?;
     #[cfg(target_os = "windows")]
     {
-        run_windows_runtime(startup_started_at, runtime_config, service)
+        run_windows_runtime(startup_started_at, runtime_config, service, startup_notice)
     }
     #[cfg(not(target_os = "windows"))]
     {

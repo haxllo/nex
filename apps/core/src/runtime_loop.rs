@@ -87,6 +87,7 @@ pub(crate) fn run_windows_runtime(
     startup_started_at: Instant,
     runtime_config: Config,
     service: CoreService,
+    startup_notice: Option<String>,
 ) -> Result<(), RuntimeError> {
     let service = Arc::new(RwLock::new(service));
 
@@ -310,6 +311,15 @@ pub(crate) fn run_windows_runtime(
                 Some(status)
             }
         };
+
+    // A settings problem is reported the same way a failed launch is: in the panel,
+    // on the next open, rather than only in the log. A hotkey problem outranks it,
+    // because that one blocks using the app at all.
+    if let Some(notice) = startup_notice.as_deref() {
+        if hotkey_issue_status.is_none() {
+            overlay.set_status_text(notice);
+        }
+    }
 
     log_info(&format!(
         "[nex] startup_phase phase=hotkey_ready elapsed_ms={} hotkey={}",

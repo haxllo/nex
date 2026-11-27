@@ -22,8 +22,6 @@ const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 pub const CURRENT_CONFIG_VERSION: u32 = 28;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
-const LEGACY_INDEX_MAX_ITEMS_TOTAL_V1: u32 = 120_000;
-const LEGACY_INDEX_MAX_ITEMS_PER_ROOT_V1: u32 = 40_000;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "hotkey",
     "launch_at_startup",
@@ -172,30 +170,34 @@ mod discovery_backend_tests {
     use super::*;
 
     #[test]
-    fn old_item_limits_move_to_new_defaults() {
-        let mut cfg = Config::default();
-        cfg.version = 26;
-        cfg.index_max_items_total = 120_000;
-        cfg.index_max_items_per_root = 40_000;
-        let changed = apply_migrations(&mut cfg, "");
-        assert!(changed);
-        assert_eq!(cfg.index_max_items_per_root, 200_000);
-        assert_eq!(cfg.index_max_items_total, 500_000);
-        assert_eq!(cfg.version, CURRENT_CONFIG_VERSION);
+    fn walkdir_survives_a_load_and_a_rebuild() {
+        // The key is only useful if it is still there after the file is rewritten.
+        let raw = "version = 28
+file_discovery_backend = \"walkdir\"
+";
+        let (mut cfg, _format) = parse_text_with_format(raw).expect("parse");
+        assert_eq!(cfg.file_discovery_backend, DiscoveryBackend::Walkdir);
+        let _ = apply_migrations(&mut cfg, raw);
+        assert_eq!(cfg.file_discovery_backend, DiscoveryBackend::Walkdir);
     }
 
     #[test]
-    fn custom_item_limits_are_kept() {
-        let mut cfg = Config::default();
-        cfg.version = 26;
-        cfg.index_max_items_total = 300_000;
-        cfg.index_max_items_per_root = 80_000;
-        let _ = apply_migrations(&mut cfg, "");
-        assert_eq!(cfg.index_max_items_per_root, 80_000);
-        assert_eq!(cfg.index_max_items_total, 300_000);
+    fn the_removed_index_caps_are_dropped_from_a_config() {
+        // They never bounded discovery, so a file that still carries them is
+        // rewritten once instead of keeping dead keys forever.
+        let raw = "version = 28
+index_max_items_total = 500000
+index_max_items_per_root = 200000
+";
+        let (mut cfg, _format) = parse_text_with_format(raw).expect("parse");
+        let changed = apply_migrations(&mut cfg, raw);
+        assert!(changed, "a file with the dead caps must be rewritten");
+        let encoded = toml::to_string_pretty(&cfg).expect("encode");
+        assert!(!encoded.contains("index_max_items_total"));
+        assert!(!encoded.contains("index_max_items_per_root"));
     }
 
-    #[test]
+#[test]
     fn user_template_persists_the_schema_version() {
         let dir = std::env::temp_dir().join(format!("nex-config-template-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -643,8 +645,6 @@ pub struct Config {
     /// How long (ms) the WebView stays resident after the overlay is
     /// hidden before being torn down to free memory (warm-then-release).
     pub ui_warm_release_ms: u32,
-    pub index_max_items_total: u32,
-    pub index_max_items_per_root: u32,
     pub index_max_items_per_query_seed: u32,
     /// Maximum directory depth walked below each discovery root; 0 = unlimited.
     pub discovery_max_depth: u32,
@@ -727,8 +727,6 @@ impl Default for Config {
             idle_cache_trim_ms: 900,
             active_memory_target_mb: 72,
             ui_warm_release_ms: 5_000,
-            index_max_items_total: 500_000,
-            index_max_items_per_root: 200_000,
             index_max_items_per_query_seed: 5_000,
             discovery_max_depth: 0,
             quick_launch: QuickLaunchConfig::default(),
@@ -1340,37 +1338,16 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         ));
     }
 
-    if cfg.index_max_items_total < 10_000 || cfg.index_max_items_total > 2_000_000 {
-        return Err(format!(
-            "index_max_items_total must be between 10000 and 2000000, got {}",
-            cfg.index_max_items_total
-        ));
-    }
-
     if cfg.discovery_max_depth > 256 {
         return Err(format!(
             "discovery_max_depth must be between 0 and 256, got {}",
             cfg.discovery_max_depth
         ));
     }
-    if cfg.index_max_items_per_root < 1_000 || cfg.index_max_items_per_root > 1_000_000 {
-        return Err(format!(
-            "index_max_items_per_root must be between 1000 and 1000000, got {}",
-            cfg.index_max_items_per_root
-        ));
-    }
-
     if cfg.index_max_items_per_query_seed < 250 || cfg.index_max_items_per_query_seed > 200_000 {
         return Err(format!(
             "index_max_items_per_query_seed must be between 250 and 200000, got {}",
             cfg.index_max_items_per_query_seed
-        ));
-    }
-
-    if cfg.index_max_items_per_root > cfg.index_max_items_total {
-        return Err(format!(
-            "index_max_items_per_root ({}) must be <= index_max_items_total ({})",
-            cfg.index_max_items_per_root, cfg.index_max_items_total
         ));
     }
 
@@ -1640,14 +1617,6 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
     }
 
     if source_version < 7 {
-        if !raw_has_key(raw, "index_max_items_total") {
-            cfg.index_max_items_total = Config::default().index_max_items_total;
-            changed = true;
-        }
-        if !raw_has_key(raw, "index_max_items_per_root") {
-            cfg.index_max_items_per_root = Config::default().index_max_items_per_root;
-            changed = true;
-        }
         if !raw_has_key(raw, "index_max_items_per_query_seed") {
             cfg.index_max_items_per_query_seed = Config::default().index_max_items_per_query_seed;
             changed = true;
@@ -1756,20 +1725,6 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         changed = true;
     }
 
-    if source_version < 27 {
-        // The old per-folder limit kept only the first 40k items from each
-        // folder, which left most files out of the index. Raise configs that
-        // still use the old defaults; custom values stay as set.
-        if cfg.index_max_items_total == LEGACY_INDEX_MAX_ITEMS_TOTAL_V1 {
-            cfg.index_max_items_total = Config::default().index_max_items_total;
-            changed = true;
-        }
-        if cfg.index_max_items_per_root == LEGACY_INDEX_MAX_ITEMS_PER_ROOT_V1 {
-            cfg.index_max_items_per_root = Config::default().index_max_items_per_root;
-            changed = true;
-        }
-    }
-
     if source_version < 28 {
         // The panel now opens as a bare search bar over a vertical list.
         // `expanded` and `true` were the old defaults, so a config holding
@@ -1777,6 +1732,13 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         // here, and any later choice sticks.
         cfg.view_mode = ViewMode::Compact;
         cfg.grid_view = false;
+        changed = true;
+    }
+
+    // The two index caps bounded nothing (discovery never applied them), so they
+    // are gone. A file that still carries them is rewritten once here so the dead
+    // keys stop being copied forward into every future config.
+    if raw_has_key(raw, "index_max_items_total") || raw_has_key(raw, "index_max_items_per_root") {
         changed = true;
     }
 

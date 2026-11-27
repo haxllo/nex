@@ -313,6 +313,11 @@ pub struct FileSystemDiscoveryProvider {
     max_depth: usize,
     show_files: bool,
     show_folders: bool,
+    /// Whether the MFT path may run for NTFS roots, decided from
+    /// `file_discovery_backend` (and the env override) when the provider is
+    /// built. It is a field rather than a config read at discovery time because
+    /// discovery runs on the indexer's hot path.
+    mft_enabled: bool,
 }
 
 impl FileSystemDiscoveryProvider {
@@ -327,17 +332,41 @@ impl FileSystemDiscoveryProvider {
         show_files: bool,
         show_folders: bool,
     ) -> Self {
+        Self::with_backend(
+            roots,
+            max_depth,
+            excluded_roots,
+            show_files,
+            show_folders,
+            crate::config::DiscoveryBackend::Auto,
+        )
+    }
+
+    /// The same provider, with the MFT decision taken from `backend`.
+    pub fn with_backend(
+        roots: Vec<PathBuf>,
+        max_depth: usize,
+        excluded_roots: Vec<PathBuf>,
+        show_files: bool,
+        show_folders: bool,
+        backend: crate::config::DiscoveryBackend,
+    ) -> Self {
         Self {
             roots,
             excluded_roots,
             max_depth,
             show_files,
             show_folders,
+            mft_enabled: mft_backend_enabled_for(backend),
         }
     }
 
     pub fn backend_label(&self) -> &'static str {
-        "walkdir"
+        if self.mft_enabled {
+            "mft"
+        } else {
+            "walkdir"
+        }
     }
 
     pub fn from_config(
@@ -345,17 +374,22 @@ impl FileSystemDiscoveryProvider {
         max_depth: usize,
     ) -> Self {
         #[cfg(target_os = "windows")]
-        if config.file_discovery_backend == crate::config::DiscoveryBackend::Auto {
-            crate::logging::info(
-                "[nex] file_discovery_backend=auto uses native discovery (MFT for NTFS, walkdir otherwise)",
-            );
-        }
-        Self::with_options(
+        crate::logging::info(&format!(
+            "[nex] file_discovery_backend={} ({})",
+            config.file_discovery_backend.as_str(),
+            if mft_backend_enabled_for(config.file_discovery_backend) {
+                "MFT for NTFS roots, walkdir otherwise"
+            } else {
+                "walkdir only"
+            }
+        ));
+        Self::with_backend(
             config.discovery_roots.clone(),
             max_depth,
             config.discovery_exclude_roots.clone(),
             config.show_files,
             config.show_folders,
+            config.file_discovery_backend,
         )
     }
 }
@@ -381,6 +415,7 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
             self.max_depth,
             self.show_files,
             self.show_folders,
+            self.mft_enabled,
             emit,
             on_item_discovered,
         )
@@ -449,6 +484,11 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
         stamp.push_str(if self.show_files { "true" } else { "false" });
         stamp.push_str(";show_folders=");
         stamp.push_str(if self.show_folders { "true" } else { "false" });
+        // The backend decides whether the MFT path contributes rows, so switching
+        // it has to invalidate the pass: without this, turning MFT off left the
+        // rows it had produced and ran no new pass over the same roots.
+        stamp.push_str(";backend=");
+        stamp.push_str(if self.mft_enabled { "mft" } else { "walkdir" });
         Some(stamp)
     }
 }
@@ -492,6 +532,7 @@ fn discover_filesystem_walk_into<'a, 'b>(
     max_depth: usize,
     show_files: bool,
     show_folders: bool,
+    mft_enabled: bool,
     emit: &'a mut dyn FnMut(SearchItem) -> Result<(), ProviderError>,
     on_item_discovered: Option<&'b mut dyn FnMut(usize)>,
 ) -> Result<usize, ProviderError> {
@@ -508,7 +549,7 @@ fn discover_filesystem_walk_into<'a, 'b>(
 
     // One snapshot per NTFS volume serves every root on it.
     #[cfg(target_os = "windows")]
-    let mft_handled = if mft_backend_enabled() {
+    let mft_handled = if mft_enabled {
         try_mft_volumes(
             roots,
             &exclusion_policy,
@@ -624,6 +665,7 @@ fn discover_filesystem_walk(
             max_depth,
             show_files,
             show_folders,
+            mft_backend_enabled_for(crate::config::DiscoveryBackend::Auto),
             &mut emit,
             on_item_discovered,
         )?;
@@ -642,13 +684,32 @@ fn effective_walk_depth(max_depth: usize) -> usize {
 
 /// MFT is the primary backend for NTFS roots; the directory walk is the
 /// fallback (non-NTFS, helper unavailable, unlocked/denied volumes).
-/// `NEX_DISCOVERY_BACKEND=walkdir` forces the old path.
+///
+/// `file_discovery_backend = "walkdir"` in the config turns MFT off, because a
+/// user reaching for it is usually working around an MFT or helper problem and a
+/// key that changes nothing is worse than no key. `NEX_DISCOVERY_BACKEND` still
+/// wins when it is set, so the old env escape hatch keeps working.
 #[cfg(target_os = "windows")]
-fn mft_backend_enabled() -> bool {
-    match std::env::var("NEX_DISCOVERY_BACKEND") {
-        Ok(value) => !matches!(value.trim().to_ascii_lowercase().as_str(), "walkdir" | "off"),
-        Err(_) => true,
-    }
+fn mft_backend_enabled_for(requested: crate::config::DiscoveryBackend) -> bool {
+    mft_backend_enabled_from(match std::env::var("NEX_DISCOVERY_BACKEND") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "walkdir" | "off" => Some(false),
+            _ => Some(true),
+        },
+        Err(_) => None,
+    }, requested)
+}
+
+/// The decision without touching the environment, so it can be tested.
+#[cfg(target_os = "windows")]
+fn mft_backend_enabled_from(
+    env_override: Option<bool>,
+    requested: crate::config::DiscoveryBackend,
+) -> bool {
+    env_override.unwrap_or(!matches!(
+        requested,
+        crate::config::DiscoveryBackend::Walkdir
+    ))
 }
 
 /// Take one snapshot per NTFS volume for the roots that live on it. The
@@ -926,7 +987,7 @@ pub fn defer_until_helper_ready() {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
-    if !mft_backend_enabled() {
+    if !mft_backend_enabled_for(crate::config::DiscoveryBackend::Auto) {
         return;
     }
     // Listen for the helper's command channel before anything waits on it.
@@ -1108,7 +1169,7 @@ fn mft_incremental(
         1500
     };
 
-    if !mft_backend_enabled() || provider.roots.is_empty() {
+    if !provider.mft_enabled || provider.roots.is_empty() {
         return None;
     }
     let policy = DiscoveryExclusionPolicy::new(&provider.excluded_roots);
@@ -3322,6 +3383,55 @@ mod tests {
                 "label mismatch for {path}: native={native:?} powershell={:?}",
                 expected.get(index)
             );
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod mft_backend_choice_tests {
+    use super::*;
+    use crate::config::DiscoveryBackend;
+
+    /// `file_discovery_backend = "walkdir"` is the documented escape hatch for an
+    /// MFT or helper problem. It used to be logged and then ignored.
+    #[test]
+    fn walkdir_in_the_config_turns_mft_off() {
+        assert!(!mft_backend_enabled_from(None, DiscoveryBackend::Walkdir));
+        assert!(mft_backend_enabled_from(None, DiscoveryBackend::Auto));
+    }
+
+    /// The env var predates the config key and still wins, so a script or a
+    /// shortcut that sets it keeps working.
+    #[test]
+    fn the_env_var_still_overrides_the_config() {
+        assert!(!mft_backend_enabled_from(Some(false), DiscoveryBackend::Auto));
+        assert!(mft_backend_enabled_from(Some(true), DiscoveryBackend::Walkdir));
+    }
+
+    #[test]
+    fn the_provider_carries_the_decision_and_reports_it() {
+        let walkdir = FileSystemDiscoveryProvider::with_backend(
+            Vec::new(),
+            0,
+            Vec::new(),
+            true,
+            true,
+            DiscoveryBackend::Walkdir,
+        );
+        assert_eq!(walkdir.backend_label(), "walkdir");
+
+        let auto = FileSystemDiscoveryProvider::with_backend(
+            Vec::new(),
+            0,
+            Vec::new(),
+            true,
+            true,
+            DiscoveryBackend::Auto,
+        );
+        // An env var set on the test machine may override; only assert the
+        // config-driven path when the override is absent.
+        if std::env::var("NEX_DISCOVERY_BACKEND").is_err() {
+            assert_eq!(auto.backend_label(), "mft");
         }
     }
 }

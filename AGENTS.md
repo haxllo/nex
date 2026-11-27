@@ -240,7 +240,7 @@ active meanwhile. The snapshot-sync loop respawns a dead indexer.
 |---|---|
 | `NEX_SUPPRESS_STDIO=1` | Suppress stdout logging (also `SWIFTFIND_SUPPRESS_STDIO`) |
 | `NEX_WINDOWS_RUNTIME_SMOKE=1` | Enable the windows runtime smoke test (otherwise skips) |
-| `NEX_DISCOVERY_BACKEND` | `mft` forces the NTFS MFT snapshot backend, `walkdir` disables it; unset = auto (MFT when a per-root cap is >= 100k) |
+| `NEX_DISCOVERY_BACKEND` | `walkdir` disables the NTFS MFT backend, anything else forces it on; unset = `file_discovery_backend` in the config decides (`auto` = MFT, `walkdir` = walk only) |
 
 ## Overlay Architecture
 

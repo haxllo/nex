@@ -5,7 +5,7 @@ use std::rc::Rc;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(target_os = "windows")]
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 #[cfg(target_os = "windows")]
 use std::time::{Duration, Instant};
 
@@ -1114,6 +1114,23 @@ impl RuntimeWorker {
         report_failed_action(&self.overlay, &mut self.overlay_state, message);
     }
 
+    /// Take the service read lock for an action path, logging the wait when
+    /// it is long enough to be felt. Actions only ever need a shared view of
+    /// the service, so a reader is enough; a blocking write lock here would
+    /// also queue behind every other reader, including the startup store
+    /// load, which is what made Enter land late after the panel had gone.
+    /// A wait that remains is a writer holding the lock; record it instead
+    /// of letting it read as a mystery delay.
+    fn service_read_for_action(&self, what: &str) -> RwLockReadGuard<'_, CoreService> {
+        let started = Instant::now();
+        let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
+        let waited_ms = started.elapsed().as_millis();
+        if waited_ms >= 50 {
+            log_info(&format!("[nex] {what} lock_wait_ms={waited_ms}"));
+        }
+        guard
+    }
+
     fn launch_quick_launch_item(&mut self, path: &str) {
         let Some(item) = self.quick_launch_items.iter().find(|item| item.path == path) else {
             return;
@@ -1126,7 +1143,7 @@ impl RuntimeWorker {
             Ok(()) => {
                 log_info(&format!("[nex] quick_launch launched '{title}'"));
                 let id = {
-                    let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
+                    let guard = self.service_read_for_action("quick_launch lookup");
                     let db = guard.db_ref();
                     crate::index_store::find_item_by_path_or_title(&db, &path)
                         .ok()
@@ -1134,7 +1151,7 @@ impl RuntimeWorker {
                         .map(|(id, _, _, _, _)| id)
                 };
                 if let Some(id) = id {
-                    let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
+                    let guard = self.service_read_for_action("quick_launch record");
                     if let Err(error) = guard.record_successful_launch_by_id(&id) {
                         log_warn(&format!("[nex] record_launch failed: {error}"));
                     }
@@ -2839,12 +2856,11 @@ impl RuntimeWorker {
                                             uninstall_action.title.as_str(),
                                         );
                                         if let Some(target_title) = uninstall_target_title_from_action_title(uninstall_action.title.as_str()) {
-                                            if let Ok(guard) = self.service.write() {
-                                                // Same double-lock trap as the
-                                                // context-menu path: the lookup
-                                                // must not outlive its guard.
-                                                let _ = guard.delete_item_by_path_or_title(&target_title);
-                                            }
+                                            // The lookup must not outlive its guard:
+                                            // the try_write() below needs the readers
+                                            // gone. Same trap as the context-menu path.
+                                            let guard = self.service_read_for_action("uninstall delete");
+                                            let _ = guard.delete_item_by_path_or_title(&target_title);
                                         }
                                         // The row can outlive the delete when the
                                         // registry title and the shell title differ,
@@ -3142,11 +3158,13 @@ impl RuntimeWorker {
 
                 self.overlay.hide_sync();
                 self.overlay_state.on_escape();
-                // The service read guard would otherwise live until the end of
-                // the match, which the failure arm needs to borrow `self` mutably
-                // for (the panel comes back to report it).
+                // The guard must not live until the end of the match: the
+                // failure arm borrows `self` mutably to put the panel back.
+                // Launching only reads the service, so a reader is enough —
+                // and unlike a write lock it does not queue behind the other
+                // readers (the startup store load holds one for the whole load).
                 let launch_result = launch_overlay_selection(
-                    &*self.service.write().unwrap_or_else(|e| e.into_inner()),
+                    &*self.service_read_for_action("launch"),
                     &self.runtime_config,
                     &self.plugin_registry,
                     &self.current_results,

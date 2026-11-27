@@ -127,8 +127,22 @@ jobs:
       - name: Package the zip and manifest
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/windows/package-windows-artifact.ps1 -Channel stable
 
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y
+      # Pinned, not whatever a runner image ships: the wizard directives this
+      # script uses need a recent Inno, and a drifting compiler would change the
+      # installer without a commit. Installed per-user, so no elevation.
+      - name: Install Inno Setup 7.1.1
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe'
+          $out = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.1-x64.exe'
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Start-Process -FilePath $out -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER' -Wait
+          $iscc = Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 7\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "Inno Setup 7.1.1 did not install; ISCC.exe is missing at $iscc" }
+          $banner = (& $iscc 2>&1 | Select-Object -First 1)
+          if ($banner -notmatch '7') { throw "Expected the Inno Setup 7 compiler, got: $banner" }
+          Write-Host $banner
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Package the installer
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/windows/package-windows-installer.ps1 -Channel stable

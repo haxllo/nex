@@ -46,6 +46,8 @@ $artifactName = "nex-$Version-windows-x64"
 $stageDir = Join-Path $outputRootAbs "$artifactName-stage"
 $issPath = Join-Path $repoRoot "scripts/windows/nex.iss"
 $setupIconPath = Join-Path $repoRoot "apps/assets/nex.ico"
+$backLightPath = Join-Path $repoRoot "apps/assets/installer/back-light.png"
+$backDarkPath = Join-Path $repoRoot "apps/assets/installer/back-dark.png"
 
 Write-Host "== Building Nex Setup.exe for $Version ==" -ForegroundColor Cyan
 
@@ -53,6 +55,9 @@ if (-not (Test-Path $InnoCompiler)) {
   $resolvedInno = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
   if (-not $resolvedInno) {
     $candidates = @(
+      "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe",
+      "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
+      "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
       "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
       "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
       "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
@@ -90,7 +95,7 @@ if (-not (Test-Path (Join-Path $stageDir "bin/NexUIProcess.exe"))) {
 }
 
 New-Item -ItemType Directory -Force -Path $outputRootAbs | Out-Null
-& $InnoCompiler "/DAppVersion=$Version" "/DStageDir=$stageDir" "/DSetupIconPath=$setupIconPath" "/O$outputRootAbs" $issPath
+& $InnoCompiler "/DAppVersion=$Version" "/DStageDir=$stageDir" "/DSetupIconPath=$setupIconPath" "/DWizardBackLightPath=$backLightPath" "/DWizardBackDarkPath=$backDarkPath" "/O$outputRootAbs" $issPath
 if ($LASTEXITCODE -ne 0) {
   throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
 }

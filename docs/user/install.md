@@ -20,6 +20,10 @@ Download the installer or the portable zip from the
 Nex starts in the background on the **Win** key. There is no window to keep open
 and no first-run wizard.
 
+The installer asks one question - whether to add a desktop shortcut and to start
+with Windows - and follows your Windows light or dark setting. It installs for the
+current account without an admin prompt.
+
 The first launch registers a Windows scheduled task called `NexHelperV2` and
 shows one User Account Control prompt. Accepting it is what allows the hotkey to
 respond while an elevated window is in front. Declining it leaves Nex working for

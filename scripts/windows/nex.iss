@@ -146,6 +146,7 @@ const
 
 var
   DeleteDataCheckbox: TNewCheckBox;
+  DeleteUserDataAfterUninstall: Boolean;
 
 procedure ActivateInstallerWindow();
 begin
@@ -813,11 +814,26 @@ begin
   DeleteDataCheckbox.Checked := false;
 end;
 
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  // The uninstaller asks once, on its welcome page. Reading the box here keeps the
+  // answer before the wizard form and its controls are torn down.
+  if Assigned(DeleteDataCheckbox) then
+    DeleteUserDataAfterUninstall := DeleteDataCheckbox.Checked;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
-    StopNexRuntime()
-  else if (CurUninstallStep = usPostUninstall) and DeleteDataCheckbox.Checked then
+  begin
+    if Assigned(DeleteDataCheckbox) then
+      DeleteUserDataAfterUninstall := DeleteDataCheckbox.Checked;
+    StopNexRuntime();
+  end
+  // The control is gone by the last step, which is why the answer was captured
+  // above: touching it here raised "Could not call proc" and dropped the deletion.
+  else if (CurUninstallStep = usPostUninstall) and DeleteUserDataAfterUninstall then
   begin
     // Remove per-user data only when the user opted in. The runtime was
     // stopped during usUninstall and [UninstallRun] already ran, so

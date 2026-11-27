@@ -2,11 +2,12 @@
 
 ## Non-negotiables (read before editing)
 
-1. **Linear first.** For any user-reported bug, feature request, or implementation
-   task, search the Nex project (P-CIQ-2) for a matching issue *before touching
-   code*. Reuse it, or create one if none matches. Keep it current. Questions,
-   planning, and status requests do not need an issue. Details: "Linear Project
-   Tracking" below.
+1. **Find the existing issue before touching code.** For any user-reported bug,
+   feature request, or implementation task, run the lookup in "Finding the issue
+   you are about to fix" *before* editing. Reuse the issue you find, widen it if
+   the symptom differs, and create one only when nothing covers it. Never create
+   a near-duplicate of an issue that is already open. Questions, planning and
+   status requests need no issue. Details: "Linear Project Tracking" below.
 2. **Never close an issue yourself.** Finished work moves to **In Review**; only
    a merged PR moves it to **Done**. Setting Done before the PR merges is not
    allowed, no matter how complete the implementation looks.
@@ -378,6 +379,48 @@ reject someone else's commit.
 
 Commit message bodies MUST contain NO AI agent embedded names. This means absolutely NO `Co-authored-by:` trailers referencing any bot or AI, NO bot signatures, NO mentions of AI assistants, and NO references to agent systems. This applies to commit messages, tag messages, branch descriptions, and any other git-related text.
 
+### Finding the issue you are about to fix
+
+A duplicate has already been created here by skipping the step below, so the order
+is fixed. Each step is cheaper than the one after it, and the first one that
+answers ends the search.
+
+1. **Did the task arrive as a GitHub issue?** Read its backlink comment; it names
+   the Linear issue outright and nothing else needs searching:
+
+   ```bash
+   gh issue view <n> --json comments --jq '.comments[].body' | grep -o 'CIQ-[0-9]*'
+   ```
+
+   That is the id to work. Do not create a second Linear issue for the same
+   report.
+2. **No backlink, and Linear is reachable?** Search P-CIQ-2 with **at least three
+   different vocabularies** before concluding nothing exists: the symptom in the
+   reporter's words, the symbol or config key involved, and the surface (installer,
+   overlay, search, discovery). Titles are a weak match; open the plausible hits
+   and compare their "Observed" section against the report in front of you.
+3. **No Linear access (an outside contributor)?** Search the GitHub issues instead
+   and use that issue as the record. See "Contributors without Linear" below.
+4. **Found the same problem under a different symptom?** Do not open a twin.
+   Comment what you are about to change on the existing issue and widen its body
+   so it still describes the whole problem. Two symptoms, one cause, one issue.
+5. **Found an issue that only partly covers this?** Create a new issue only when
+   the work genuinely splits, link it with `relatedTo`, name the older issue in
+   the new one, and use *Related to CIQ-n* in the PR. If the older issue also
+   still needs work, say so in a comment before you start.
+6. **Realised later that a duplicate exists anyway?** Mark it with
+   `save_issue({ id, duplicateOf: "<the other id>" })`, comment naming the issue
+   that survives, and close it as **Duplicate** (never Done). Close the mirrored
+   GitHub issue by hand with a pointer, because the mirror is create-only.
+
+**The one time this was got wrong here**, for calibration: a report that
+`panel_background = "acrylic"` stopped Nex from starting was filed as a new issue
+(#443) two days after #388, "A typo in config.toml makes Nex not start at all,
+with no message anywhere a user would look". Same root cause — an unreadable
+config ends the process — so the correct move was a comment on #388 naming the enum
+case being fixed and leaving its other half (the silence, and the five backups
+never offered) open. Instead #388 still sits open and #443 shipped separately.
+
 ## Linear Project Tracking
 
 The Nex Linear project is [P-CIQ-2](https://linear.app/ciqada/project/nex-838bd9949214).
@@ -388,9 +431,29 @@ The Nex Linear project is [P-CIQ-2](https://linear.app/ciqada/project/nex-838bd9
 - **State policy:** agents may move issues to In Progress or In Review. Only a
   merged PR closes an issue (moves it to Done). Do not set Done directly, even
   for retroactive or verification-only work.
-- When work is delegated, agents should update the same issue and avoid creating duplicate issues for subtasks. If an agent cannot access Linear, it must ask the user to connect Linear for that agent and wait before starting the Nex task.
+- When work is delegated, agents should update the same issue and avoid creating duplicate issues for subtasks.
+- **Agents working for the owner** need Linear: if the connection is missing, ask for it before starting. Outside contributors are the exception, below.
 - Use project status updates for periodic progress, health, and risks; use milestones for major deliverables with clear outcomes. Do not create a milestone for every issue or a health update without evidence.
-- If Linear is unavailable, ask the user to connect it for the current agent before starting implementation.
+- If Linear is unavailable to an agent working for the owner, ask for it before
+  starting implementation.
+
+### Contributors without Linear
+
+The Linear project is not shared with outside contributors, and nothing about
+contributing should depend on it. Someone cloning this repo and opening a pull
+request works in GitHub only:
+
+- **The record is the GitHub issue.** Search the open issues (several wordings,
+  same as step 2 above) and reuse or open one there. Do not create Linear issues,
+  and never invent a `CIQ-<n>` id.
+- **The id is the maintainer's job.** A PR from a contributor may go up without a
+  `CIQ-<n>` in its body; the owner links it to a Linear issue and adds the id
+  before merge. The contributor is not asked to wait for access.
+- **The local hooks are the owner's rules.** A contributor's commit message is
+  their own (see "Commit Message Content"); `NEX_ALLOW_NO_LINEAR=1` exists for
+  maintenance commits and is not something a contributor has to reach for.
+- If an agent is doing the work for a contributor, it follows this section, not
+  the Linear steps above.
 
 ### Use the whole issue, not just the title
 

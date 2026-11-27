@@ -3,9 +3,11 @@
 `AGENTS.md` is the source of truth. Read it before changing anything; this file
 only repeats the rules that must never be skipped.
 
-1. **Linear first.** Search the Nex project (P-CIQ-2) for a matching issue
-   before touching code. Reuse it or create one, and set its state from what
-   actually happened. Questions and planning do not need an issue.
+1. **Find the existing issue first.** Read AGENTS.md, "Finding the issue you are
+   about to fix": a GitHub issue's backlink comment names its Linear id, and a
+   search needs several wordings before you may conclude nothing exists. Reuse or
+   widen what you find; never open a near-duplicate. Outside contributors work
+   from GitHub issues only and are not asked for a Linear id.
 2. **Verify, then report.** Use `CARGO_TARGET_DIR=G:\nex-target` and a release
    build; never claim a check passed unless it was run.
 3. **Commit identity.** Author is the human responsible for the change — the repo

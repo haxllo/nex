@@ -70,9 +70,12 @@ clamping a value, so a mistake is visible instead of silently corrected.
 
 An invalid configuration is handled differently at the two moments it can arrive.
 
-- **At startup**, the invalid file stops the process. It is a hard failure, not a
-  silent fall back to defaults, because quietly discarding a user's configuration
-  is worse than refusing to start.
+- **At startup**, the invalid file never stops the process. It is kept beside the
+  original as `config.toml.invalid`, the newest `config.backup-*` or
+  `config.v*-backup-*` file is tried and, if it parses, restored over
+  `config.toml`; only when no backup parses does the session start on defaults.
+  Either way the outcome is reported in the panel on the next open, because a
+  settings problem that only reaches the log is one the user cannot act on.
 - **On reload**, the invalid file is skipped and the running configuration is kept.
   The reason is logged. Editing the file into an invalid state while Nex is running
   therefore changes nothing until the next valid save.

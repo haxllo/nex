@@ -17,6 +17,8 @@ const LEGACY_APP_DIR_NAME_WINDOWS: &str = "SwiftFind";
 const APP_DIR_NAME_UNIX: &str = "nex";
 const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
+/// Where an unreadable config is parked so it can be repaired by hand.
+const CONFIG_INVALID_FILE_NAME: &str = "config.toml.invalid";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
 pub const CURRENT_CONFIG_VERSION: u32 = 28;
@@ -836,23 +838,93 @@ fn is_toml_path(path: &Path) -> bool {
 /// recoverable, and the panel is reachable; exiting is not, because the only trace
 /// is a log line nobody reads while the app appears to refuse to launch. The user
 /// can copy the quarantined file back once whatever it got wrong is fixed.
-pub fn load_for_startup(path: Option<&Path>) -> Config {
+pub fn load_for_startup(path: Option<&Path>) -> (Config, Option<String>) {
     let resolved = path
         .map(Path::to_path_buf)
         .unwrap_or_else(stable_config_path);
     match load(path) {
-        Ok(config) => config,
+        Ok(config) => (config, None),
         Err(error) => {
-            let fate = match quarantine_unreadable(&resolved) {
-                Some(aside) => format!("kept as {} and ", aside.display()),
-                None => String::new(),
-            };
+            // The unreadable file is kept whatever happens next, so nothing is
+            // lost before the backups are tried.
+            let quarantined = quarantine_unreadable(&resolved);
+            let kept_as = quarantined
+                .as_ref()
+                .map(|aside| format!("kept as {}", aside.display()))
+                .unwrap_or_else(|| "not moved".to_string());
+
+            // Every write keeps a backup, so a working file is usually one save
+            // behind. Falling back to it beats resetting the user to defaults, and
+            // this is the offer those backups never had.
+            if let Some(backup) = latest_backup(&resolved) {
+                if let Ok(mut config) = load(Some(&backup)) {
+                    config.config_path = resolved.clone();
+                    if std::fs::copy(&backup, &resolved).is_ok() {
+                        crate::logging::warn(&format!(
+                            "[nex] config could not be read ({error}); {kept_as}, restored {}",
+                            backup.display()
+                        ));
+                        return (
+                            config,
+                            Some(format!(
+                                "Your settings could not be read. Restored the last backup, {}.",
+                                backup
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "config backup".to_string())
+                            )),
+                        );
+                    }
+                }
+            }
+
             crate::logging::warn(&format!(
-                "[nex] config could not be read ({error}); {fate}starting with default settings"
+                "[nex] config could not be read ({error}); {kept_as} and starting with default settings"
             ));
-            default_for_path(&resolved)
+            (
+                default_for_path(&resolved),
+                Some(format!(
+                    "Your settings could not be read, so Nex started with defaults. The old file is beside it as {}.",
+                    CONFIG_INVALID_FILE_NAME
+                )),
+            )
         }
     }
+}
+
+/// The newest settings backup beside `path`, either the timestamped copy every
+/// save writes (`config.backup-<secs>.toml`) or the one a migration writes
+/// (`config.v<N>-backup-<secs>.<ext>`).
+pub fn latest_backup(path: &Path) -> Option<PathBuf> {
+    let dir = path.parent()?;
+    let mut newest: Option<(u64, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_backup = (name.starts_with("config.backup-") && name.ends_with(".toml"))
+            || (name.starts_with("config.v") && name.contains("-backup-"));
+        if !is_backup {
+            continue;
+        }
+        // The filename carries the write time, and two backups written inside the
+        // same second have identical mtimes, so the stamp in the name decides.
+        let stamp = name
+            .rsplit_once('-')
+            .and_then(|(_, rest)| rest.split('.').next())
+            .and_then(|digits| digits.parse::<u64>().ok())
+            .or_else(|| {
+                entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|delta| delta.as_secs())
+            });
+        let Some(stamp) = stamp else { continue };
+        if newest.as_ref().is_none_or(|(best, _)| stamp > *best) {
+            newest = Some((stamp, entry.path()));
+        }
+    }
+    newest.map(|(_, path)| path)
 }
 
 /// Move an unreadable config out of the way so the session can write a fresh one
@@ -861,7 +933,7 @@ fn quarantine_unreadable(path: &Path) -> Option<PathBuf> {
     if !path.exists() {
         return None;
     }
-    let aside = path.with_file_name(format!("{}.invalid", CONFIG_FILE_NAME));
+    let aside = path.with_file_name(CONFIG_INVALID_FILE_NAME);
     std::fs::rename(path, &aside).ok().map(|_| aside)
 }
 
@@ -2184,9 +2256,10 @@ mod unreadable_config_tests {
         let path = dir.join(CONFIG_FILE_NAME);
         std::fs::write(&path, "panel_background = \"unterminated\n").expect("write broken config");
 
-        let config = load_for_startup(Some(&path));
+        let (config, notice) = load_for_startup(Some(&path));
 
         assert_eq!(config.panel_background, PanelBackground::Glass);
+        assert!(notice.is_some(), "the reset has to be reported to the user");
         assert!(!path.exists(), "the unreadable file should move aside");
         assert!(
             dir.join("config.toml.invalid").exists(),
@@ -2205,11 +2278,75 @@ mod unreadable_config_tests {
         let encoded = toml::to_string_pretty(&expected).expect("encode");
         std::fs::write(&path, encoded).expect("write config");
 
-        let config = load_for_startup(Some(&path));
+        let (config, notice) = load_for_startup(Some(&path));
 
         assert_eq!(config.panel_background, PanelBackground::White);
         assert_eq!(config.max_results, 7);
+        assert!(notice.is_none(), "a readable config says nothing");
         assert!(!dir.join("config.toml.invalid").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+
+#[cfg(test)]
+mod startup_backup_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nex-cfg-backup-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// Every save keeps a timestamped backup. When the live file is unreadable
+    /// the newest one is the last settings that worked, so it is used instead of
+    /// resetting the user - the offer those backups never had.
+    #[test]
+    fn an_unreadable_config_is_replaced_by_the_newest_backup() {
+        let dir = scratch("restore");
+        let path = dir.join(CONFIG_FILE_NAME);
+
+        let mut older = Config::default();
+        older.panel_background = PanelBackground::Glass;
+        std::fs::write(dir.join("config.backup-100.toml"), toml::to_string_pretty(&older).unwrap())
+            .expect("write older");
+
+        let mut newer = Config::default();
+        newer.panel_background = PanelBackground::White;
+        newer.max_results = 33;
+        std::fs::write(dir.join("config.backup-200.toml"), toml::to_string_pretty(&newer).unwrap())
+            .expect("write newer");
+
+        std::fs::write(&path, "panel_background = \"unterminated
+").expect("write broken");
+
+        let (config, notice) = load_for_startup(Some(&path));
+
+        assert_eq!(config.panel_background, PanelBackground::White);
+        assert_eq!(config.max_results, 33);
+        let notice = notice.expect("a restore has to be reported");
+        assert!(notice.contains("Restored"), "unexpected notice: {notice}");
+        // The broken file is kept for repair and the live file now parses.
+        assert!(dir.join(CONFIG_INVALID_FILE_NAME).exists());
+        assert!(load(Some(&path)).is_ok(), "the restored file must be readable");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_newest_backup_wins_regardless_of_name() {
+        let dir = scratch("newest");
+        let path = dir.join(CONFIG_FILE_NAME);
+        std::fs::write(dir.join("config.backup-100.toml"), "version = 28
+").unwrap();
+        std::fs::write(dir.join("config.v27-backup-200.toml"), "version = 28
+").unwrap();
+        let newest = latest_backup(&path).expect("a backup");
+        assert_eq!(newest.file_name().unwrap(), "config.v27-backup-200.toml");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

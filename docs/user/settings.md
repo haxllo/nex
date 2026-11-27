@@ -29,10 +29,13 @@ the rest of the file is read as written, and the substitution is logged in
 newer Nex is opened by an older one.
 
 A file that cannot be read at all - broken TOML, a value of the wrong type, a
-setting outside its allowed range - is moved aside to `config.toml.invalid` beside
-the original, and Nex starts with default settings. Repair the quarantined file and
-copy it back over `config.toml` to recover your settings; the defaults are written
-to a fresh `config.toml` in the meantime.
+setting outside its allowed range - is moved aside to `config.toml.invalid`, and
+Nex restores your most recent backup (`config.backup-<time>.toml`) over
+`config.toml`. If no backup can be read either, it starts with default settings.
+
+Either way the panel says so the next time you open it, and the log names the file
+that was kept. Repair the quarantined file and copy it back over `config.toml` to
+recover the rest.
 
 ## Starter
 

@@ -1314,6 +1314,17 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             }
                             Err(e) => {
                                 crate::logging::warn(&format!("[nex] webview build failed: {e}"));
+                                // No window exists and the page will never reach
+                                // WebviewReady, so stop claiming a show is coming:
+                                // otherwise every later hotkey does nothing with no
+                                // trace of why.
+                                show_pending = false;
+                                if let Ok(mut s) = state.lock() {
+                                    s.visible = false;
+                                }
+                                let _ = event_tx.send(OverlayEvent::UpdateStatus(
+                                    "The panel could not be drawn. Quit and start Nex again.".to_string(),
+                                ));
                                 return;
                             }
                         }
@@ -2053,19 +2064,31 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
                 UiCommand::OpenSettings { snapshot}=> {
-                    *last_settings_snapshot.lock().unwrap() = Some(snapshot.clone());
+                    *last_settings_snapshot
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = Some(snapshot.clone());
                     if let Some((w, _)) = &settings_ui {
                         //Already open just raise it
                         let _ = w.set_visible(true);
                         let _ = w.set_focus();
                     } else {
-                        let sw = tao::window::WindowBuilder::new()
+                        // A window that cannot be created is a settings window
+                        // that does not open, not an overlay loop that ends.
+                        let sw = match tao::window::WindowBuilder::new()
                             .with_title("Nex Settings")
                             .with_inner_size(tao::dpi::LogicalSize::new(790.0, 560.0))
                             .with_decorations(false)
                             .with_visible(false)
                             .build(target)
-                            .expect("settings window");
+                        {
+                            Ok(window) => window,
+                            Err(error) => {
+                                crate::logging::warn(&format!(
+                                    "[nex] settings window build failed: {error}; Settings stays closed"
+                                ));
+                                return;
+                            }
+                        };
                         settings_window_id = Some(sw.id());
                         position_window_centered(&sw);
                         let settings_hwnd_for_ipc: Arc<Mutex<Option<HWND>>> = Arc::new(Mutex::new(Some(sw.hwnd() as HWND)));
@@ -2101,7 +2124,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                         }
                                     }
                                     Ok(SettingsMessage::Ready(_)) => {
-                                        let snap = snapshot_for_ipc.lock().unwrap().clone();
+                                        let snap = snapshot_for_ipc
+                                            .lock()
+                                            .unwrap_or_else(|error| error.into_inner())
+                                            .clone();
                                         if let Some(snap) = snap {
                                             let _ = proxy_for_ipc.send_event(UiCommand::OpenSettings {
                                                 snapshot: snap,
@@ -2467,9 +2493,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         } else {
             "(unknown panic payload)".to_string()
         };
-        crate::logging::warn(&format!(
-            "[nex] event loop panicked during teardown; continuing shutdown: {msg}"
-        ));
+        // Not "during teardown": this fires whenever a handler panics, and saying
+        // teardown made a user-visible quit look like a normal shutdown.
+        crate::logging::warn(&format!("[nex] overlay event loop panicked: {msg}"));
+        LOOP_ALIVE.store(false, Ordering::SeqCst);
+        is_running.store(false, Ordering::SeqCst);
+        return Err(format!("overlay event loop panicked: {msg}"));
     }
 
     LOOP_ALIVE.store(false, Ordering::SeqCst);

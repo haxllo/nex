@@ -5,12 +5,16 @@
   [string]$Notes
 )
 
-# Drafts docs/releases/v<ver>-notes.md from the commit log since the previous
-# tag, using the section order that RELEASE-TEMPLATE.md and the What's New page
-# expect. The What's New view (apps/core/src/whats_new.rs) renders the release
-# body up to the "## Commit Log" marker, so that marker must stay last.
-# The generated prose is a starting point: rewrite the summary and the
-# per-item lines in the user's words before tagging.
+# Drafts docs/releases/v<ver>-notes.md from the commit log since the previous tag.
+#
+# This file is the GitHub release page only. The in-app What's New page is
+# docs/whats-new.md, written by hand, and apps/core/src/whats_new.rs asserts it
+# carries no commit log - the two documents are not interchangeable.
+#
+# Shape: a title and a one-line count, then Features / Bug Fixes / Performance for
+# subjects that carry a feat:, fix: or perf: prefix, then the commit log, open,
+# which is the complete list and the only view naming each author. Untyped subjects
+# get no section of their own.
 
 $ErrorActionPreference = 'Stop'
 

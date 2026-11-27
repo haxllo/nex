@@ -33,6 +33,15 @@ The two documents are not interchangeable:
 | `docs/releases/v<ver>-notes.md` | people browsing GitHub releases | the workflow, from commits |
 | `docs/whats-new.md` | the person using Nex | a human, every release |
 
+### Shape of a drafted release page
+
+A title and a one-line count, then `### Features`, `### Bug Fixes` and
+`### Performance` for commits whose subject starts with `feat:`, `fix:` or `perf:`,
+then `## Commit Log`. The log is open, not folded, because unprefixed commits get no
+section of their own and the log is the complete list — and the only view that names
+each author. There is no "What changed" wrapper heading and no catch-all "Changes"
+section: both existed once and described the same commits a second time.
+
 `docs/whats-new.md` carries its own format and voice instructions in HTML
 comments at the top of the file. Read them before editing; they are the authority
 on that page's structure.

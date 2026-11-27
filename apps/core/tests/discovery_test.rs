@@ -447,12 +447,21 @@ fn from_config_walkdir_backend_is_labeled_walkdir() {
     assert_eq!(provider.backend_label(), "walkdir");
 }
 
+/// `backend_label` reports the backend that will actually run. It used to return
+/// "walkdir" unconditionally while MFT was attempted anyway, which is the bug CIQ-291
+/// fixed: the label, the config and the behaviour now come from one decision.
 #[test]
-fn from_config_auto_backend_never_panics() {
+fn from_config_auto_backend_reports_the_backend_that_runs() {
     let config = nex_core::config::Config::default();
     let provider = FileSystemDiscoveryProvider::from_config(&config, 5);
     let label = provider.backend_label();
-    assert_eq!(label, "walkdir");
+    // An env var set on the runner (NEX_DISCOVERY_BACKEND) overrides the config, so
+    // only the config-driven answer is asserted when it is absent.
+    if std::env::var("NEX_DISCOVERY_BACKEND").is_err() {
+        assert_eq!(label, "mft");
+    } else {
+        assert!(matches!(label, "mft" | "walkdir"), "unexpected label {label}");
+    }
 }
 
 fn make_deep_tree(label: &str) -> (PathBuf, PathBuf) {

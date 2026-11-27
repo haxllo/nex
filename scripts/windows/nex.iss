@@ -14,11 +14,29 @@
   #error SetupIconPath must be passed to ISCC via /DSetupIconPath=...
 #endif
 
+; The wizard background: a light and a dark image behind the page content, drawn
+; at 497:360 and scaled by Setup. Regenerate them with
+; scripts/windows/make-installer-backgrounds.ps1.
+#ifndef WizardBackLightPath
+  #define WizardBackLightPath "..\..\apps\assets\installer\back-light.png"
+#endif
+
+#ifndef WizardBackDarkPath
+  #define WizardBackDarkPath "..\..\apps\assets\installer\back-dark.png"
+#endif
+
 [Setup]
 AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#AppVersion}
-AppVerName={#MyAppName}
+AppVerName={#MyAppName} {#AppVersion}
+AppPublisher=haxllo
+AppPublisherURL=https://github.com/haxllo/nex
+AppSupportURL=https://github.com/haxllo/nex/issues
+AppUpdatesURL=https://github.com/haxllo/nex/releases
+AppCopyright=Copyright (C) 2026 haxllo
+VersionInfoCompany=haxllo
+VersionInfoDescription=Nex Setup
 UninstallDisplayName={#MyAppName}
 DefaultGroupName=Nex
 OutputDir=artifacts\windows
@@ -26,7 +44,20 @@ OutputBaseFilename=nex-{#AppVersion}-windows-x64-setup
 Compression=lzma
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
-WizardStyle=modern
+WizardStyle=modern dynamic windows11 includetitlebar hidebevels
+; Back images are the only artwork: the stock large and small wizard images are
+; switched off, so the page content sits on the tinted background instead of
+; beside a generic bitmap. dynamic keeps the pair following Windows' own theme;
+; a forced dark wizard on a light desktop is a worse first impression than none.
+WizardBackImageFile={#WizardBackLightPath}
+WizardBackImageFileDynamicDark={#WizardBackDarkPath}
+WizardImageFile=
+WizardSmallImageFile=
+; Two pages, both of them choices: what gets set up, then the install itself.
+; The licence page is gone (MIT ships in the zip and in the app), and the welcome
+; and ready pages only repeat what the task list and the progress bar already say.
+DisableWelcomePage=yes
+DisableReadyPage=yes
 PrivilegesRequired=lowest
 ; Allow installer scope selection:
 ; - Current user (default, no elevation)
@@ -43,7 +74,19 @@ CloseApplications=no
 RestartApplications=no
 UninstallDisplayIcon={app}\bin\NexUIProcess.exe
 SetupIconFile={#SetupIconPath}
-LicenseFile=..\..\LICENSE
+
+[Messages]
+; The words the wizard says. Everything here replaces Inno's stock phrasing, so
+; the pages read as Nex rather than as a generic setup program.
+SetupAppTitle=Nex Setup
+SetupWindowTitle=Nex Setup
+SetupLdrStartupMessage=Starting Nex Setup...
+WizardSelectTasks=Choose what Nex sets up
+SelectTasksDesc=Nex searches your files, folders and apps from one panel. Press Win to open it.
+SelectTasksLabel2=Both are optional and can be changed later.
+FinishedHeadingLabel=Nex is installed
+FinishedLabel=Nex runs in the background. Press Win to search everything on this PC.
+ClickFinish=Finish
 
 [Files]
 Source: "{#StageDir}\bin\NexUIProcess.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
@@ -66,17 +109,14 @@ Name: "{autoprograms}\Nex"; Filename: "{app}\bin\NexUIProcess.exe"; Parameters: 
 Name: "{autodesktop}\Nex"; Filename: "{app}\bin\NexUIProcess.exe"; Parameters: "--background"; Tasks: desktopicon
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
-Name: "startuplaunch"; Description: "Launch at startup (can be changed later in config.toml)"; GroupDescription: "Startup:"
+; Flat list, no group headers: two choices do not need headings.
+Name: "desktopicon"; Description: "Desktop shortcut"
+Name: "startuplaunch"; Description: "Start Nex when Windows starts"
 
 [Registry]
 ; Startup registration — no process spawn needed.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Nex"; ValueData: "{app}\bin\NexUIProcess.exe --background"; Flags: uninsdeletevalue; Tasks: startuplaunch
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Nex"; Flags: deletevalue; Tasks: not startuplaunch
-
-[Run]
-; Launch Nex after install (no config/setup processes needed — nex handles those on first run).
-Filename: "{app}\bin\NexUIProcess.exe"; Parameters: "--background"; Description: "Launch Nex now"; Flags: runhidden nowait postinstall skipifsilent; Check: ShouldLaunchNexAfterInstall
 
 [UninstallRun]
 ; Ask running instance to terminate cleanly first.
@@ -120,14 +160,255 @@ end;
 
 procedure RemoveLegacyOrphan(); forward;
 
+var
+  WizardTextColor, WizardMutedColor: TColor;
+  OptionsNote: TNewStaticText;
+  ScopeNote: TNewStaticText;
+  FinishedBody: TNewStaticText;
+  LaunchCheck: TNewCheckBox;
+  LaunchAfterInstall: Boolean;
+
+function SystemUsesLightTheme(): Boolean;
+var
+  value: Cardinal;
+begin
+  Result := True;
+  if RegQueryDWordValue(HKCU, 'Software' + Chr(92) + 'Microsoft' + Chr(92) + 'Windows' + Chr(92) + 'CurrentVersion' + Chr(92) + 'Themes' + Chr(92) + 'Personalize', 'AppsUseLightTheme', value) then
+    Result := value <> 0;
+end;
+
+// One left edge for every piece of text on a page, a heavier title, muted body
+// copy, and colours taken from the same light/dark choice Setup already made.
+// Without this the stock wizard indents the title less than the description
+// under it and sets both in the dialog font at one size.
+procedure ApplyModernLook();
+var
+  light: Boolean;
+begin
+  light := SystemUsesLightTheme();
+  if light then
+  begin
+    WizardTextColor := $1E1E20;
+    WizardMutedColor := $64646A;
+  end
+  else
+  begin
+    WizardTextColor := $F2F2F4;
+    WizardMutedColor := $A6A6AC;
+  end;
+
+  WizardForm.PageNameLabel.Left := ScaleX(40);
+  WizardForm.PageNameLabel.Top := ScaleY(8);
+  WizardForm.PageNameLabel.Width := ScaleX(484);
+  WizardForm.PageNameLabel.Height := ScaleY(22);
+  WizardForm.PageNameLabel.Font.Name := 'Segoe UI Semibold';
+  WizardForm.PageNameLabel.Font.Size := 12;
+  WizardForm.PageNameLabel.Font.Color := WizardTextColor;
+
+  WizardForm.PageDescriptionLabel.Left := ScaleX(40);
+  WizardForm.PageDescriptionLabel.Top := ScaleY(31);
+  WizardForm.PageDescriptionLabel.Width := ScaleX(484);
+  WizardForm.PageDescriptionLabel.Font.Name := 'Segoe UI';
+  WizardForm.PageDescriptionLabel.Font.Size := 9;
+  WizardForm.PageDescriptionLabel.Font.Color := WizardMutedColor;
+
+  // All wizard artwork is the back image, so the empty small/left bitmap frames
+  // are hidden instead of standing in the corner as blank boxes.
+  WizardForm.WizardSmallBitmapImage.Visible := False;
+
+  // The stock label on the choices page repeated the header, so it goes and the
+  // list takes the surface at a size that matches the body copy.
+  WizardForm.SelectTasksLabel.Visible := False;
+  WizardForm.TasksList.Left := 0;
+  WizardForm.TasksList.Top := 0;
+  WizardForm.TasksList.Height := ScaleY(300);
+  WizardForm.TasksList.Font.Name := 'Segoe UI';
+  WizardForm.TasksList.Font.Size := 10;
+
+  OptionsNote := TNewStaticText.Create(WizardForm);
+  OptionsNote.Parent := WizardForm.SelectTasksPage;
+  OptionsNote.Left := 0;
+  OptionsNote.Top := ScaleY(124);
+  OptionsNote.Width := ScaleX(556);
+  OptionsNote.Caption := 'Both can be changed later in Settings.';
+  OptionsNote.Font.Name := 'Segoe UI';
+  OptionsNote.Font.Size := 9;
+  OptionsNote.Font.Color := WizardMutedColor;
+
+  ScopeNote := TNewStaticText.Create(WizardForm);
+  ScopeNote.Parent := WizardForm.SelectTasksPage;
+  ScopeNote.Left := 0;
+  ScopeNote.Top := ScaleY(272);
+  ScopeNote.Width := ScaleX(556);
+  ScopeNote.Caption := 'Installs for this Windows account, with no admin prompt.';
+  ScopeNote.Font.Name := 'Segoe UI';
+  ScopeNote.Font.Size := 8;
+  ScopeNote.Font.Color := WizardMutedColor;
+
+  WizardForm.FilenameLabel.Visible := False;
+  WizardForm.StatusLabel.Font.Name := 'Segoe UI';
+  WizardForm.StatusLabel.Font.Size := 10;
+  WizardForm.StatusLabel.Font.Color := WizardTextColor;
+  WizardForm.ProgressGauge.Top := ScaleY(32);
+
+  WizardForm.WizardBitmapImage2.Visible := False;
+  WizardForm.FinishedHeadingLabel.Left := ScaleX(40);
+  WizardForm.FinishedHeadingLabel.Top := ScaleY(16);
+  WizardForm.FinishedHeadingLabel.Width := ScaleX(528);
+  WizardForm.FinishedHeadingLabel.AutoSize := False;
+  WizardForm.FinishedHeadingLabel.WordWrap := False;
+  WizardForm.FinishedHeadingLabel.Font.Name := 'Segoe UI Semibold';
+  WizardForm.FinishedHeadingLabel.Font.Size := 15;
+  WizardForm.FinishedHeadingLabel.Font.Color := WizardTextColor;
+  FinishedBody := TNewStaticText.Create(WizardForm);
+  FinishedBody.Parent := WizardForm.FinishedPage;
+  FinishedBody.Left := ScaleX(40);
+  FinishedBody.Top := ScaleY(58);
+  FinishedBody.Width := ScaleX(520);
+  FinishedBody.Height := ScaleY(120);
+  FinishedBody.AutoSize := False;
+  FinishedBody.WordWrap := True;
+  FinishedBody.Caption := 'Nex runs in the background. Press Win to search everything on this PC.';
+  FinishedBody.Font.Name := 'Segoe UI';
+  FinishedBody.Font.Size := 10;
+  FinishedBody.Font.Color := WizardMutedColor;
+  FinishedBody.Visible := False;
+
+  LaunchAfterInstall := True;
+  LaunchCheck := TNewCheckBox.Create(WizardForm);
+  LaunchCheck.Parent := WizardForm.FinishedPage;
+  LaunchCheck.Left := ScaleX(40);
+  LaunchCheck.Top := ScaleY(96);
+  LaunchCheck.Width := ScaleX(300);
+  LaunchCheck.Caption := 'Launch Nex now';
+  LaunchCheck.Checked := True;
+  LaunchCheck.Font.Name := 'Segoe UI';
+  LaunchCheck.Font.Size := 10;
+  LaunchCheck.Font.Color := WizardTextColor;
+  LaunchCheck.Visible := False;
+
+  WizardForm.FinishedLabel.Left := ScaleX(40);
+  WizardForm.FinishedLabel.Top := ScaleY(54);
+  WizardForm.FinishedLabel.Width := ScaleX(528);
+  WizardForm.FinishedLabel.AutoSize := False;
+  WizardForm.FinishedLabel.WordWrap := True;
+  WizardForm.FinishedLabel.Height := ScaleY(150);
+  WizardForm.FinishedLabel.Font.Name := 'Segoe UI';
+  WizardForm.FinishedLabel.Font.Size := 10;
+  WizardForm.FinishedLabel.Font.Color := WizardMutedColor;
+end;
+
 procedure InitializeWizard();
 begin
   ActivateInstallerWindow();
+  ApplyModernLook();
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  // The choice is read here because this is the last moment the user can make it.
+  if CurPageID = wpFinished then
+    LaunchAfterInstall := LaunchCheck.Checked;
+end;
+
+procedure DeinitializeSetup();
+var
+  ResultCode: Integer;
+begin
+  // Read the box at the last moment as well, so closing the wizard with the X
+  // honours an unticked box instead of falling back to the default.
+  if LaunchCheck <> nil then
+    LaunchAfterInstall := LaunchCheck.Checked;
+  if WizardSilent or (not LaunchAfterInstall) then
+    exit;
+  Exec(ExpandConstant('{app}\bin\NexUIProcess.exe'), '--background', '', SW_HIDE, ewNoWait, ResultCode);
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
   ActivateInstallerWindow();
+  // The wizard's own wording for the last button is "Next" on the only page that
+  // asks anything and "Finish" at the end. Both say what happens instead.
+  if CurPageID <> wpFinished then
+  begin
+    FinishedBody.Visible := False;
+    LaunchCheck.Visible := False;
+  end;
+
+  LaunchAfterInstall := True;
+  LaunchCheck := TNewCheckBox.Create(WizardForm);
+  LaunchCheck.Parent := WizardForm.FinishedPage;
+  LaunchCheck.Left := ScaleX(40);
+  LaunchCheck.Top := ScaleY(96);
+  LaunchCheck.Width := ScaleX(300);
+  LaunchCheck.Caption := 'Launch Nex now';
+  LaunchCheck.Checked := True;
+  LaunchCheck.Font.Name := 'Segoe UI';
+  LaunchCheck.Font.Size := 10;
+  LaunchCheck.Font.Color := WizardTextColor;
+  LaunchCheck.Visible := False;
+
+  if CurPageID = wpSelectTasks then
+  begin
+    WizardForm.NextButton.Caption := 'Install';
+    WizardForm.ActiveControl := WizardForm.NextButton;
+  end
+  else if CurPageID = wpFinished then
+  begin
+    WizardForm.NextButton.Caption := 'Done';
+    // The finished page recomputes its own layout when it is shown, which puts the
+    // body label back to one clipped line, so the geometry is applied here.
+    WizardForm.WizardBitmapImage2.Visible := False;
+    WizardForm.FinishedHeadingLabel.Left := ScaleX(40);
+    WizardForm.FinishedHeadingLabel.Top := ScaleY(16);
+    WizardForm.FinishedHeadingLabel.Width := ScaleX(528);
+    WizardForm.FinishedHeadingLabel.AutoSize := False;
+    WizardForm.FinishedHeadingLabel.WordWrap := False;
+    FinishedBody := TNewStaticText.Create(WizardForm);
+  FinishedBody.Parent := WizardForm.FinishedPage;
+  FinishedBody.Left := ScaleX(40);
+  FinishedBody.Top := ScaleY(58);
+  FinishedBody.Width := ScaleX(520);
+  FinishedBody.Height := ScaleY(120);
+  FinishedBody.AutoSize := False;
+  FinishedBody.WordWrap := True;
+  FinishedBody.Caption := 'Nex runs in the background. Press Win to search everything on this PC.';
+  FinishedBody.Font.Name := 'Segoe UI';
+  FinishedBody.Font.Size := 10;
+  FinishedBody.Font.Color := WizardMutedColor;
+  FinishedBody.Visible := False;
+
+  LaunchAfterInstall := True;
+  LaunchCheck := TNewCheckBox.Create(WizardForm);
+  LaunchCheck.Parent := WizardForm.FinishedPage;
+  LaunchCheck.Left := ScaleX(40);
+  LaunchCheck.Top := ScaleY(96);
+  LaunchCheck.Width := ScaleX(300);
+  LaunchCheck.Caption := 'Launch Nex now';
+  LaunchCheck.Checked := True;
+  LaunchCheck.Font.Name := 'Segoe UI';
+  LaunchCheck.Font.Size := 10;
+  LaunchCheck.Font.Color := WizardTextColor;
+  LaunchCheck.Visible := False;
+
+  WizardForm.FinishedLabel.Left := ScaleX(40);
+    WizardForm.FinishedLabel.Top := ScaleY(54);
+    WizardForm.FinishedLabel.Width := ScaleX(528);
+    WizardForm.FinishedLabel.Height := ScaleY(150);
+    WizardForm.FinishedLabel.AutoSize := False;
+    WizardForm.FinishedLabel.WordWrap := True;
+    // Not hidden: the finished page drops the "launch now" checkbox when this
+    // label is invisible, so it is emptied instead and the body above carries
+    // the sentence.
+    WizardForm.FinishedLabel.Caption := '';
+    FinishedBody.Visible := True;
+    FinishedBody.BringToFront;
+    LaunchCheck.Top := ScaleY(96);
+    LaunchCheck.Checked := True;
+    LaunchCheck.Visible := True;
+    LaunchCheck.BringToFront;
+  end;
 end;
 
 procedure ForceStopRuntimeByPath(RuntimeExe: string); forward;

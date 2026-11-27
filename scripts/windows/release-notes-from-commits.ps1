@@ -166,9 +166,6 @@ try {
   $out.Add("")
   $out.Add("Changes since $PreviousTag — $summary.")
   $out.Add("")
-  $out.Add("## What changed")
-  $out.Add("")
-
   if ($features.Count) {
     $out.Add("### Features")
     $out.Add("")
@@ -188,15 +185,6 @@ try {
     $out.Add("")
   }
 
-  # Only when something landed without a type prefix. An empty heading reads
-  # worse than none at all.
-  if ($untyped.Count) {
-    $out.Add("### Changes")
-    $out.Add("")
-    $out.AddRange($untyped)
-    $out.Add("")
-  }
-
   # No "Notes" section by default. It used to emit a placeholder bullet
   # ("Limits worth knowing...") that shipped in every drafted release and
   # described nothing, so the section now appears only when -Notes is passed.
@@ -208,16 +196,11 @@ try {
     }
     $out.Add("")
   }
-  # The list above already names every change, so the per-commit view is folded
-  # away: it repeats the same subjects and adds SHAs and authors that only matter
-  # when chasing a specific change. The heading stays for the reader who opens it.
+  # Unfolded on purpose. This is the complete list - subjects without a prefix land
+  # only here - and it is the one view that names each author.
   $out.Add("## Commit Log")
   $out.Add("")
-  $out.Add("<details><summary>All $($log.Count) commits</summary>")
-  $out.Add("")
   $out.AddRange($log)
-  $out.Add("")
-  $out.Add("</details>")
 
   $text = ($out -join "`n") + "`n"
 

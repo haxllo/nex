@@ -380,7 +380,7 @@ owner the work and can answer for it.
 | `feat:` | Features |
 | `fix:` | Bug Fixes |
 | `perf:` | Performance |
-| anything else | Changes |
+| anything else | only the commit log (no section of its own) |
 
 Nothing enforces this yet, so an unprefixed subject still reaches the release page —
 it just lands under "Changes", which is where almost everything goes today. Prefix a

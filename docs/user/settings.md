@@ -57,9 +57,7 @@ These are the keys people change first.
 | `discovery_roots` | Your user profile | Folders scanned for files and folders |
 | `discovery_exclude_roots` | `AppData\Local\Temp`, `AppData\Local\Microsoft\Windows\INetCache` | Folders never scanned |
 | `discovery_max_depth` | `0` | Folder depth below each root, 0 meaning unlimited, 256 maximum |
-| `file_discovery_backend` | `"auto"` | `auto` uses the NTFS master file table where it pays off and falls back otherwise. `walkdir` always walks directories. |
-| `index_max_items_total` | `500000` | Cap on rows held in the index |
-| `index_max_items_per_root` | `200000` | Cap per discovery root |
+| `file_discovery_backend` | `"auto"` | `auto` uses the NTFS master file table and falls back to walking directories where it cannot. `walkdir` always walks directories — the escape hatch if the master file table path misbehaves. |
 | `index_max_items_per_query_seed` | `5000` | Candidates pulled from the full-text index per file query, 250 to 200000 |
 
 Beyond `discovery_exclude_roots`, Nex always skips common noise: `Windows`,

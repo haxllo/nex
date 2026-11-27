@@ -12,12 +12,15 @@ File discovery has a fast path and a fallback.
 
 | Backend | What it reads | When it is used |
 |---|---|---|
-| MFT | The NTFS master file table directly, plus the USN change journal for deltas | NTFS volumes whose item cap makes a directory walk impractical |
+| MFT | The NTFS master file table directly, plus the USN change journal for deltas | NTFS volumes, when the helper is reachable |
 | walkdir | Directory enumeration, then `ReadDirectoryChangesW` for changes | Everything else, including non-NTFS roots |
 
-`file_discovery_backend = "auto"` picks per root: MFT when the root's cap is large
-enough to justify it, walkdir otherwise. Setting `"walkdir"` forces the fallback
-everywhere.
+`file_discovery_backend = "auto"` takes the MFT snapshot for NTFS roots and falls
+back to walking for anything else (non-NTFS volumes, an unreachable helper, a
+volume whose journal cannot be read). Setting `"walkdir"` forces the walk
+everywhere, which is the escape hatch when the MFT path misbehaves. The
+`NEX_DISCOVERY_BACKEND` environment variable still overrides the config value when
+it is set.
 
 The MFT path needs the elevated helper to read the journal, because reading it
 requires privilege a Medium process does not have. When the helper is not ready,
@@ -103,10 +106,10 @@ Built-in exclusions always apply to files and folders, never to applications:
 `Windows`, `Program Files`, `AppData`, `node_modules`, `.git`, `__pycache__`, and
 a short list of shell junctions. `discovery_exclude_roots` adds to them.
 
-Three caps bound what the index will hold: `index_max_items_total`,
-`index_max_items_per_root`, and `discovery_max_depth`. A capped discovery is a
-deliberate trade: a complete index of a multi-terabyte drive would cost more than
-it returns.
+`discovery_max_depth` bounds how deep the walk goes below each root. It is the
+only remaining cap: `index_max_items_total` and `index_max_items_per_root` were
+documented for years but discovery never applied them, so they are gone rather
+than kept as keys that change nothing.
 
 ## The two stores
 

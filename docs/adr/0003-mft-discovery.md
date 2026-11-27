@@ -28,9 +28,10 @@ file-reference and parent-reference pairs. Apply the configured roots, exclusion
 depth limit, and item caps to the resulting records. Keep directory walking as the
 fallback, and use the USN change journal to apply deltas rather than rescanning.
 
-Selection is per root and automatic: MFT when the root's item cap is large enough
-for the scan to pay off, walkdir otherwise. `file_discovery_backend` can force
-either.
+Selection is automatic: MFT for NTFS roots where the helper is reachable,
+walkdir otherwise. `file_discovery_backend = "walkdir"` forces the walk everywhere.
+(The item caps this decision originally referred to never bounded discovery and
+have since been removed.)
 
 ## Alternatives considered
 

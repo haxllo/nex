@@ -162,7 +162,6 @@ procedure RemoveLegacyOrphan(); forward;
 
 var
   WizardTextColor, WizardMutedColor: TColor;
-  OptionsNote: TNewStaticText;
   ScopeNote: TNewStaticText;
   FinishedBody: TNewStaticText;
   LaunchCheck: TNewCheckBox;
@@ -225,20 +224,10 @@ begin
   WizardForm.TasksList.Font.Name := 'Segoe UI';
   WizardForm.TasksList.Font.Size := 10;
 
-  OptionsNote := TNewStaticText.Create(WizardForm);
-  OptionsNote.Parent := WizardForm.SelectTasksPage;
-  OptionsNote.Left := 0;
-  OptionsNote.Top := ScaleY(124);
-  OptionsNote.Width := ScaleX(556);
-  OptionsNote.Caption := 'Both can be changed later in Settings.';
-  OptionsNote.Font.Name := 'Segoe UI';
-  OptionsNote.Font.Size := 9;
-  OptionsNote.Font.Color := WizardMutedColor;
-
   ScopeNote := TNewStaticText.Create(WizardForm);
   ScopeNote.Parent := WizardForm.SelectTasksPage;
   ScopeNote.Left := 0;
-  ScopeNote.Top := ScaleY(272);
+  ScopeNote.Top := ScaleY(64);
   ScopeNote.Width := ScaleX(556);
   ScopeNote.Caption := 'Installs for this Windows account, with no admin prompt.';
   ScopeNote.Font.Name := 'Segoe UI';

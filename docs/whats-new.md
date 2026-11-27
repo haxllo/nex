@@ -1,4 +1,4 @@
-<!-- release: 3.4.1 -->
+<!-- release: 3.5.0 -->
 <!--
   WHAT THIS FILE IS
   The page people see inside Nex, in the What's New view, after they update.
@@ -152,19 +152,28 @@
 
 -->
 
-## A frosted panel to choose
+## The setup wizard
 
-Liquid Glass bends what is behind the panel. Acrylic skips the bending and frosts it instead, so your wallpaper shows through as one even blur. It is the look the Windows taskbar has when its transparency is on.
+The first thing a new install shows you now looks like the app it installs: it follows your Windows light or dark setting, asks one question, and ends with a single button.
 
-Pick it in Settings, under Appearance, next to Liquid Glass.
+Two things that were quietly wrong are fixed here. Uninstalling used to show an error before telling you it had succeeded, and launch at startup stopped working after you turned it off and on again.
 
-### Acrylic
+### The installer
 
-- **Even frost.** The wallpaper behind the panel is blurred by the same amount everywhere, with no bend at the edges and no colour split.
-- **The same corners as Liquid Glass.** Switching between the two does not move the panel's outline.
-- **A plain border.** One line around the whole panel, in place of the lit bevel glass wears.
+- **It follows Windows.** Light desktop, light wizard; dark desktop, dark wizard. There is no setting of its own.
+- **One page of choices**, for a desktop shortcut and for starting with Windows. Then it installs.
+- **Two clicks to finish**: Install, then Done, with the option to open Nex at the end.
+- **A shorter page list.** The licence page and the nearly empty "preparing" page are gone; the licence still ships with the app.
+
+### Settings that recover
+
+- **A settings file Nex cannot read no longer resets you to defaults.** It restores your most recent backup instead, and the panel tells you it did.
+- **When the backup cannot be read either**, Nex starts with defaults, says so in the panel, and keeps the unreadable file beside the original so nothing is lost.
+- **None of this used to be reported anywhere you would look.** The failure went to a log file and no further.
 
 ### Fixes
 
-- **A launch that fails says so.** The panel used to close and leave its message on a window you could not see; it comes back with the reason instead.
-- **Copying a path, opening a file's folder, and "Run as administrator"** report their failures the same way.
+- **Uninstalling no longer shows an error** before reporting success, and "also delete my settings and search index" now actually deletes them.
+- **Launch at startup** survives being turned off and on again.
+- **`file_discovery_backend = "walkdir"`** does what the docs always said and forces directory walking. Two index caps that never bounded anything are gone rather than left pretending.
+- **The tray's power items say which machine they act on**: Shut down PC, Restart PC, Lock screen, Sleep PC. "Restart" beside Nex's own icon was easy to read as restarting Nex.

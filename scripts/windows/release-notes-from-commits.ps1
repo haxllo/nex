@@ -208,9 +208,16 @@ try {
     }
     $out.Add("")
   }
+  # The list above already names every change, so the per-commit view is folded
+  # away: it repeats the same subjects and adds SHAs and authors that only matter
+  # when chasing a specific change. The heading stays for the reader who opens it.
   $out.Add("## Commit Log")
   $out.Add("")
+  $out.Add("<details><summary>All $($log.Count) commits</summary>")
+  $out.Add("")
   $out.AddRange($log)
+  $out.Add("")
+  $out.Add("</details>")
 
   $text = ($out -join "`n") + "`n"
 

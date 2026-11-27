@@ -370,6 +370,23 @@ owner the work and can answer for it.
 
 **Note**: Use this identity for any git operation that requires an author (commits, amends, rebases, etc.).
 
+## Commit subjects group the release notes
+
+`scripts/windows/release-notes-from-commits.ps1` sorts commits into **Features**,
+**Bug Fixes**, **Performance** and **Changes** by a leading prefix on the subject:
+
+| Prefix | Section |
+|---|---|
+| `feat:` | Features |
+| `fix:` | Bug Fixes |
+| `perf:` | Performance |
+| anything else | Changes |
+
+Nothing enforces this yet, so an unprefixed subject still reaches the release page —
+it just lands under "Changes", which is where almost everything goes today. Prefix a
+subject when the change is one a reader would look for under a heading, and the
+generated notes stop being one flat list. Do not retro-fit old commits for this.
+
 ## Commit Message Content
 
 The rules below are **the owner's, for the owner's own commits**. A contributor's

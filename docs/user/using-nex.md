@@ -114,9 +114,29 @@ a stray Win press does not pull you out of the game. The tray tooltip reads
 
 ## Tray icon
 
-The tray icon has a menu with Settings, Restart, and Quit. Its tooltip reports
-`Nex (hotkey issue)` when the elevated helper is not running, which is the usual
-reason a hotkey stops working over elevated windows.
+Left-clicking the tray icon opens the panel, which is the same as pressing the
+hotkey. Right-clicking it opens this menu, in this order:
+
+| Item | What it does |
+|---|---|
+| **Open Nex** | Opens the panel |
+| **Settings** | Opens the Settings window |
+| **Check for Updates** | Looks for a newer release and offers it |
+| **Game Mode: On / Off** | Toggles the setting that keeps a stray Win press from pulling you out of a game; the tick shows the state and the label spells it out |
+| **Lock screen** | Locks Windows |
+| **Sleep PC** | Puts the PC to sleep |
+| **Shut down PC** | Asks for confirmation, then shuts Windows down |
+| **Restart PC** | Asks for confirmation, then restarts Windows |
+| **Sign out** | Signs out of Windows, ending the session and with it Nex |
+| **Quit** | Stops Nex for this session only |
+
+The items that end the session say **PC**, because "Restart" beside an app's own
+icon is easy to read as "restart Nex". Nothing in the tray restarts Nex itself;
+to do that, quit it and start it again, or use the `--restart` command line.
+
+The tooltip reports `Nex (hotkey issue)` when the elevated helper is not running,
+which is the usual reason a hotkey stops working over elevated windows, and
+`Nex (Game Mode)` while game mode is on.
 
 Settings also open from the gear button in the panel footer.
 
